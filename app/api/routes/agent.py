@@ -1,6 +1,7 @@
 """/app/api/routes/agent.py"""
 
 from api.deps import DatabaseDep
+from common.util.search_client import list_indexes, search_documents
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 from infra.database.repository import agent_log as agent_log_repo
@@ -70,6 +71,27 @@ async def get_history_detail(trace_id: str, db: DatabaseDep):
             "sources": log.sources,
             "logMetadata": log.log_metadata,
             "createDt": log.create_dt.isoformat() if log.create_dt else None,
+        },
+    }
+
+
+@router.get("/search/indexes")
+async def get_indexes():
+    """Azure AI Search 인덱스 목록 조회"""
+    indexes = await list_indexes()
+    return {"success": True, "data": indexes}
+
+
+@router.get("/search")
+async def search(query: str = Query(..., description="검색 쿼리"), top: int = Query(5, description="결과 수")):
+    """Azure AI Search 검색 테스트"""
+    context, sources = await search_documents(query, top=top)
+    return {
+        "success": True,
+        "data": {
+            "context": context,
+            "sources": sources,
+            "count": len(sources),
         },
     }
 

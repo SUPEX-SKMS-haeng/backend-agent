@@ -55,7 +55,7 @@ class RagAgentV1(BaseAgent):
             model=request.model,
             messages=messages,
             prompt_variables=None,
-            agent_name=f"rag-{self.version}",
+            agent_name=f"{self.name}-{self.version}",
         )
 
         answer = ""
@@ -98,7 +98,7 @@ class RagAgentV1(BaseAgent):
             model=request.model,
             messages=messages,
             prompt_variables=None,
-            agent_name=f"rag-{self.version}",
+            agent_name=f"{self.name}-{self.version}",
         ):
             yield chunk
 

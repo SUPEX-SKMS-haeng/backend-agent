@@ -83,3 +83,37 @@ async def search_documents(
     except Exception as e:
         logger.error(f"Azure Search error: {e}")
         return "", []
+
+
+async def list_indexes() -> list[dict]:
+    """Azure AI Search 인덱스 목록을 조회합니다."""
+    endpoint = settings.AZURE_SEARCH_ENDPOINT
+    api_key = settings.AZURE_SEARCH_KEY
+
+    if not endpoint or not api_key:
+        logger.warning("Azure AI Search 설정이 없습니다.")
+        return []
+
+    url = f"{endpoint}/indexes?api-version=2024-07-01&$select=name,fields"
+    headers = {"api-key": api_key}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        indexes = []
+        for idx in data.get("value", []):
+            indexes.append({
+                "name": idx.get("name"),
+                "fields": [
+                    {"name": f.get("name"), "type": f.get("type"), "searchable": f.get("searchable", False)}
+                    for f in idx.get("fields", [])
+                ],
+            })
+        return indexes
+
+    except Exception as e:
+        logger.error(f"Azure Search list indexes error: {e}")
+        return []

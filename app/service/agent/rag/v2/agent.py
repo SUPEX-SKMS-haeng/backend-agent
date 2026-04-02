@@ -67,6 +67,7 @@ class RagAgentV2(BaseAgent):
             provider=request.provider,
             model=request.model,
             retrieve_fn=self._retrieve,
+            agent_name=f"{self.name}-{self.version}",
         )
 
         initial_state = {
@@ -150,7 +151,7 @@ class RagAgentV2(BaseAgent):
             model=request.model,
             messages=messages,
             prompt_variables=None,
-            agent_name=f"rag-{self.version}",
+            agent_name=f"{self.name}-{self.version}",
         ):
             yield chunk
 

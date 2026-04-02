@@ -53,6 +53,7 @@ def build_rag_graph(
     provider: str,
     model: str,
     retrieve_fn: Any,
+    agent_name: str = "rag-v2",
 ) -> StateGraph:
     """
     Agentic RAG 그래프를 빌드합니다.
@@ -75,7 +76,7 @@ def build_rag_graph(
             model=model,
             messages=messages,
             prompt_variables=None,
-            agent_name="rag-v2",
+            agent_name=agent_name,
         )
         if "choices" in result:
             return result["choices"][0].get("message", {}).get("content", "")
