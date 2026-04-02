@@ -1,0 +1,72 @@
+# ============================================================
+# Ruff 공통 설정 — 모든 백엔드 서비스에 동일 적용
+# ============================================================
+# 사용법: 각 백엔드 레포 루트에 이 파일을 복사하거나 심볼릭 링크
+#   cp infra/configs/ruff.toml ./ruff.toml
+#   또는
+#   ln -s infra/configs/ruff.toml ./ruff.toml
+# ============================================================
+
+# Python 버전
+target-version = "py312"
+
+# 한 줄 최대 길이
+line-length = 120
+
+# 제외 디렉토리
+exclude = [
+    ".venv",
+    "__pycache__",
+    ".git",
+    "migrations",
+    "alembic",
+]
+
+# ---- Linter 규칙 ----
+[lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort (import 정렬)
+    "N",      # pep8-naming (네이밍 컨벤션)
+    "UP",     # pyupgrade (최신 Python 문법 권장)
+    "B",      # flake8-bugbear (흔한 버그 패턴)
+    "SIM",    # flake8-simplify (단순화 가능한 코드)
+    "T20",    # flake8-print (print 사용 감지)
+    "RET",    # flake8-return (불필요한 return)
+    "PIE",    # flake8-pie (불필요한 코드)
+    "C4",     # flake8-comprehensions (컴프리헨션 개선)
+    "DTZ",    # flake8-datetimez (timezone-aware datetime)
+    "S",      # flake8-bandit (보안 이슈)
+]
+
+ignore = [
+    "E501",   # line-length는 formatter가 처리
+    "S101",   # assert 사용 허용 (테스트 코드)
+    "S104",   # 0.0.0.0 바인딩 허용 (컨테이너 환경)
+    "B008",   # Depends() 기본값 허용 (FastAPI 패턴)
+    "N805",   # first argument 이름 규칙 완화 (Pydantic validator)
+]
+
+# ---- Import 정렬 ----
+[lint.isort]
+known-first-party = ["app", "core", "service", "infra", "database", "common"]
+force-sort-within-sections = true
+split-on-trailing-comma = true
+
+# ---- 네이밍 컨벤션 ----
+[lint.pep8-naming]
+classmethod-decorators = ["classmethod", "pydantic.field_validator", "pydantic.model_validator"]
+
+# ---- 경로별 규칙 ----
+[lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S106"]  # 테스트에서 assert, 하드코딩 비밀번호 허용
+"**/config.py" = ["S105"]           # config에서 기본 빈 문자열 시크릿 허용
+
+# ---- Formatter ----
+[format]
+quote-style = "double"           # 문자열: 쌍따옴표
+indent-style = "space"           # 들여쓰기: 스페이스
+skip-magic-trailing-comma = false
+line-ending = "auto"

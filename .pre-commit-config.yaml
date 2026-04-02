@@ -1,0 +1,27 @@
+# 백엔드 pre-commit 설정
+# setup-repo.sh에 의해 .pre-commit-config.yaml로 복사됩니다.
+#
+# 최초 설치: pip install pre-commit && pre-commit install
+# 수동 실행: pre-commit run --all-files
+
+repos:
+  # ── Ruff: 린트 + 포맷 (import 정렬 포함) ──
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff          # 린트 검사 + 자동 수정
+        args: [--fix]
+      - id: ruff-format   # 코드 포맷 (black 대체)
+
+  # ── 기본 점검 ──
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: debug-statements    # print(), pdb 등 감지

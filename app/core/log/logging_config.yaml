@@ -1,0 +1,46 @@
+version: 1
+disable_existing_loggers: False
+formatters:
+  simple:
+    format: "%(asctime)s [%(name)s(%(levelname)s)] - %(message)s"
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: simple
+    level: DEBUG
+    stream: ext://sys.stdout
+  # file:
+  #   class: logging.handlers.TimedRotatingFileHandler
+  #   level: DEBUG
+  #   formatter: simple
+  #   when: midnight  # 매일 자정 log 파일 생성
+  #   interval: 15  # 15일 동안 log 축적
+  #   suffix: "%Y%m%d"  # 지난 파일은 oai.log.20240601 같이 이름 변경
+  #   filename: ./template-app/template-app.log
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: DEBUG
+    formatter: simple
+    encoding: utf-8
+    delay: False
+    maxBytes: 104857600 # 1024 * 1024 * 100
+    backupCount: 10
+    # mode: 'a'
+    filename: ./template-app/template-app.log
+loggers:
+  uvicorn.error:
+    level: DEBUG
+    handlers: [console, file]
+    propagate: no
+  uvicorn.access:
+    level: DEBUG
+    handlers: [console, file]
+    propagate: no
+  app.log:
+    level: INFO
+    handlers: [console, file]
+    propagate: no
+root:
+  level: DEBUG
+  handlers: [console, file]
+  propagate: no
