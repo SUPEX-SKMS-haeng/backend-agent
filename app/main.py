@@ -35,6 +35,17 @@ def create_app():
         for agent_info in list_agents():
             logger.info(f"  └── Agent loaded: {agent_info['name']}/{agent_info['version']}")
 
+        # Phoenix 트레이싱 초기화
+        if settings.PHOENIX_ENABLED:
+            try:
+                from core.middleware.phoenix import PhoenixSafeProjectManager
+
+                phoenix_manager = PhoenixSafeProjectManager(collector_endpoint=settings.PHOENIX_URI)
+                phoenix_manager.get_instrumentor(settings.APP_NAME)
+                logger.info(f"  └── Phoenix instrumented: project={settings.APP_NAME}, endpoint={settings.PHOENIX_URI}")
+            except Exception as e:
+                logger.error(f"  └── Phoenix 초기화 실패: {e}")
+
         logger.info(f"{settings.APP_NAME}[{settings.APP_PORT}] service is ready and now running!!")
         yield
 
@@ -45,6 +56,17 @@ def create_app():
         generate_unique_id_function=custom_generate_unique_id,
     )
     app.include_router(api_router, prefix=settings.API_V1_STR)
+
+    if settings.PHOENIX_ENABLED:
+        try:
+            from core.middleware.phoenix import PhoenixMiddleware
+
+            app.add_middleware(PhoenixMiddleware)
+            logger.info("Phoenix 추적이 활성화되었습니다.")
+        except Exception as e:
+            logger.error(f"Phoenix 추적 설정 중 오류 발생: {e}")
+    else:
+        logger.info("Phoenix 추적이 비활성화되었습니다.")
 
     set_error_handlers(app)
 

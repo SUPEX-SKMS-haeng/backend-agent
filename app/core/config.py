@@ -6,6 +6,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    model_config = {"env_file": "../.env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
     # Application
     APP_NAME: str = "agent"
     APP_PORT: str = "8006"
@@ -36,6 +38,10 @@ class Settings(BaseSettings):
     AZURE_SEARCH_ENDPOINT: str = ""
     AZURE_SEARCH_KEY: str = ""
     AZURE_SEARCH_INDEX_NAME: str = ""
+
+    # Arize Phoenix
+    PHOENIX_ENABLED: bool = False
+    PHOENIX_URI: str = "http://localhost:6006"
 
     # Database
     DB_ENGINE: str = "postgresql"
