@@ -2,7 +2,7 @@
 
 from enum import Enum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class ChatRole(str, Enum):
@@ -23,10 +23,23 @@ class AgentRequest(BaseModel):
     chat_history: list[ChatHistory] = []
     agent_name: str = "rag"
     version: str = "v1"
-    provider: str = "azure-openai"
-    model: str = "gpt-4.1-mini"
-    org_id: str | None = "1"
+    provider: str = ""
+    model: str = ""
+    org_id: str | int | None = None
     metadata: dict | None = None
+
+    @model_validator(mode="after")
+    def set_defaults(self):
+        """빈 값이 오면 기본값으로 채움"""
+        if not self.provider:
+            self.provider = "azure-openai"
+        if not self.model:
+            self.model = "gpt-4.1-mini"
+        if not self.org_id or self.org_id == 0:
+            self.org_id = "1"
+        else:
+            self.org_id = str(self.org_id)
+        return self
 
 
 class AgentResponse(BaseModel):
