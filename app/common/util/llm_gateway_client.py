@@ -50,8 +50,8 @@ class LLMGatewayClient:
         system_token = create_system_token()
         headers = {
             "Content-Type": "application/json",
-            "Internal-Key": system_token,
-            "x-user-id": user_id,
+            "Internal-Key": system_token if system_token else "",
+            "x-user-id": user_id if user_id is not None else "",
             "x-org-id": org_id if org_id else "",
             "x-agent-name": agent_name,
         }

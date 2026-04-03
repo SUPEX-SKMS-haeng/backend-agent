@@ -129,10 +129,10 @@ class MentoringAgent(BaseAgent):
     async def stream(
         self, request: AgentRequest, user: dict, *, db: Session, response_mode: str
     ) -> AsyncGenerator[str, None]:
-        """스트리밍: 그래프로 컨텍스트/출처 확보 → 최종 생성만 스트리밍"""
-        client = self._get_client()
+        """스트리밍: 그래프 전체 실행 → 검증된 답변을 OpenAI SSE 청크 형식으로 스트리밍"""
         result = await self._run_graph(request, user)
         sources = result.get("sources", [])
+        answer = result.get("answer", "")
 
         if sources:
             yield self._format_sse({"type": "sources", "sources": sources})
@@ -147,35 +147,18 @@ class MentoringAgent(BaseAgent):
             },
         })
 
-        # 그래프에서 확보한 컨텍스트로 최종 답변을 스트리밍 재생성
-        messages = [ChatHistory(role="system", content=GENERATE_PROMPT)]
-
-        for msg in request.chat_history:
-            messages.append(msg)
-
-        context = result.get("context", "")
-        query = request.query
-        if context:
-            user_content = f"## 참고 자료\n{context}\n\n## 질문\n{query}"
-        else:
-            user_content = f"## 질문\n{query}"
-
-        messages.append(ChatHistory(role="user", content=user_content))
-
-        async for chunk in client.call_completions_stream(
-            user_id=user.get("user_id", ""),
-            org_id=request.org_id,
-            provider=request.provider,
-            model=request.model,
-            messages=messages,
-            prompt_variables=None,
-            agent_name=f"{self.name}-{self.version}",
-        ):
-            yield chunk
+        # 그래프에서 검증된 답변을 OpenAI SSE 청크 형식으로 분할 전송
+        # re-generate 없이 기존 answer를 그대로 스트리밍하여 불필요한 LLM 호출 제거
+        if answer:
+            chunk_size = 30
+            for i in range(0, len(answer), chunk_size):
+                yield self._format_sse({
+                    "choices": [{"index": 0, "delta": {"content": answer[i:i + chunk_size]}}]
+                })
 
         self._save_log(
             db, request, user, response_mode,
-            answer=result.get("answer", ""),
+            answer=answer,
             sources=sources,
             log_metadata=self._build_log_metadata(result),
         )
