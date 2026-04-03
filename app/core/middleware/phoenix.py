@@ -1,120 +1,113 @@
-"""/app/core/middleware/phoenix.py"""
+"""/app/core/middleware/phoenix.py
 
-from threading import Lock
-from typing import Any, Dict
+Phoenix(Arize) 트레이싱 — 에이전트별 프로젝트 분리 지원
+
+- contextvars 로 요청별 에이전트 프로젝트명을 전달
+- AgentProjectSpanProcessor 가 on_end 에서 span 의 Resource.PROJECT_NAME 을 오버라이드
+- Phoenix /projects 페이지에 에이전트별 별도 프로젝트로 표시됨
+  (예: rag-v1, rag-v2, mentor-v1)
+"""
+
+import contextvars
+from contextlib import contextmanager
+from typing import AsyncGenerator
 from urllib.parse import urljoin
 
-import requests
 from core.config import get_setting
 from core.log.logging import get_logging
-from fastapi import FastAPI, Request
 from openinference.instrumentation.langchain import LangChainInstrumentor
 from openinference.semconv.resource import ResourceAttributes
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk import trace as trace_sdk
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from phoenix.config import get_env_collector_endpoint, get_env_host, get_env_port
-from starlette.middleware.base import BaseHTTPMiddleware
 
 logger = get_logging()
 settings = get_setting()
 
+# ── 에이전트별 프로젝트 컨텍스트 ──
 
-class CustomOpenInferenceExporter(OTLPSpanExporter):
-    def __init__(self, custom_endpoint: str | None = None) -> None:
-        host = get_env_host()
-        if host == "0.0.0.0":
-            host = "127.0.0.1"
-
-        endpoint = custom_endpoint or get_env_collector_endpoint() or f"http://{host}:{get_env_port()}"
-        endpoint = urljoin(endpoint, "/v1/traces")
-
-        super().__init__(endpoint=endpoint)
+_current_agent_project = contextvars.ContextVar("phoenix_agent_project", default="agent")
 
 
-class CustomLangChainInstrumentor(LangChainInstrumentor):
-    def __init__(
-        self,
-        project_name: str = "default",
-        collector_endpoint: str | None = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> None:
-        try:
-            super().__init__(*args, **kwargs)
-            self.project_name = project_name
-            self.collector_endpoint = collector_endpoint
-        except Exception as e:
-            logger.error(f"Failed to initialize CustomLangChainInstrumentor: {e}")
-            raise
+@contextmanager
+def phoenix_agent_context(project_name: str):
+    """동기 코드에서 에이전트 프로젝트 컨텍스트 설정"""
+    token = _current_agent_project.set(project_name)
+    try:
+        yield
+    finally:
+        _current_agent_project.reset(token)
 
-    def instrument(self) -> None:
-        try:
-            tracer_provider = trace_sdk.TracerProvider(
-                resource=Resource({ResourceAttributes.PROJECT_NAME: self.project_name}),
-                span_limits=trace_sdk.SpanLimits(max_attributes=10_000),
+
+async def phoenix_agent_stream(
+    project_name: str, gen: AsyncGenerator
+) -> AsyncGenerator:
+    """비동기 스트림 제너레이터를 에이전트 프로젝트 컨텍스트로 래핑"""
+    token = _current_agent_project.set(project_name)
+    try:
+        async for item in gen:
+            yield item
+    finally:
+        _current_agent_project.reset(token)
+
+
+# ── 커스텀 SpanProcessor: Resource.PROJECT_NAME 을 에이전트별로 오버라이드 ──
+
+_PROJECT_ATTR = "openinference.project.name"
+
+
+class AgentProjectSpanProcessor(SimpleSpanProcessor):
+    """span 생성 시 contextvars 에서 프로젝트명을 기록하고,
+    span 종료 시 Resource 의 PROJECT_NAME 을 오버라이드하여
+    Phoenix 가 에이전트별 프로젝트로 분류하게 한다.
+
+    Phoenix 는 Resource 의 openinference.project.name 으로 프로젝트를 구분하므로
+    span attribute 만 바꿔서는 프로젝트가 분리되지 않는다.
+    on_end 에서 span._resource 를 직접 교체하는 방식으로 해결한다.
+    """
+
+    def on_start(self, span, parent_context=None) -> None:
+        project = _current_agent_project.get()
+        span.set_attribute(_PROJECT_ATTR, project)
+
+    def on_end(self, span) -> None:
+        project = (span.attributes or {}).get(_PROJECT_ATTR)
+        if project:
+            span._resource = span.resource.merge(
+                Resource({ResourceAttributes.PROJECT_NAME: project})
             )
-
-            exporter = CustomOpenInferenceExporter(custom_endpoint=self.collector_endpoint)
-            tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
-
-            super(LangChainInstrumentor, self).instrument(skip_dep_check=True, tracer_provider=tracer_provider)
-
-            logger.info(f"Successfully instrumented for project: {self.project_name}")
-        except Exception as e:
-            logger.error(f"Failed to instrument project {self.project_name}: {e}")
-            raise
+        super().on_end(span)
 
 
-class PhoenixSafeProjectManager:
-    def __init__(self, collector_endpoint: str | None = None):
-        self._instrumentors: Dict[str, CustomLangChainInstrumentor] = {}
-        self._lock = Lock()
-        self.collector_endpoint = collector_endpoint
-
-    def get_instrumentor(self, project_name: str) -> CustomLangChainInstrumentor:
-        with self._lock:
-            if project_name not in self._instrumentors:
-                instrumentor = CustomLangChainInstrumentor(
-                    project_name=project_name,
-                    collector_endpoint=self.collector_endpoint,
-                )
-                instrumentor.instrument()
-                self._instrumentors[project_name] = instrumentor
-            return self._instrumentors[project_name]
+# ── 초기화 ──
 
 
-class PhoenixMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: FastAPI, collector_endpoint: str = settings.PHOENIX_URI):
-        super().__init__(app)
-        self.project_manager = PhoenixSafeProjectManager(collector_endpoint=collector_endpoint)
+def init_phoenix_tracing(
+    default_project: str = "agent",
+    collector_endpoint: str | None = None,
+) -> None:
+    """Phoenix 트레이싱을 1회 초기화한다.
 
-    def _is_phoenix_available(self) -> bool:
-        try:
-            if not settings.PHOENIX_ENABLED:
-                return False
+    - LangChain 전역 계측 활성화
+    - AgentProjectSpanProcessor 로 에이전트별 프로젝트 분리
+    """
+    endpoint = collector_endpoint or settings.PHOENIX_URI
+    traces_endpoint = urljoin(endpoint, "/v1/traces")
 
-            if not settings.PHOENIX_URI:
-                return False
+    tracer_provider = trace_sdk.TracerProvider(
+        resource=Resource({ResourceAttributes.PROJECT_NAME: default_project}),
+        span_limits=trace_sdk.SpanLimits(max_attributes=10_000),
+    )
 
-            return True
+    exporter = OTLPSpanExporter(endpoint=traces_endpoint)
+    tracer_provider.add_span_processor(AgentProjectSpanProcessor(exporter))
 
-        except Exception as e:
-            logger.warning(f"Failed to check Phoenix availability: {e}")
-            return False
+    LangChainInstrumentor().instrument(
+        skip_dep_check=True,
+        tracer_provider=tracer_provider,
+    )
 
-    async def dispatch(self, request: Request, call_next):
-        if not self._is_phoenix_available():
-            return await call_next(request)
-
-        if not settings.APP_NAME:
-            return await call_next(request)
-
-        try:
-            self.project_manager.get_instrumentor(settings.APP_NAME)
-            response = await call_next(request)
-            return response
-        except Exception as e:
-            logger.error(f"Error in Phoenix middleware for {settings.APP_NAME}: {e}")
-            return await call_next(request)
+    logger.info(
+        f"Phoenix tracing initialized: default_project={default_project}, endpoint={endpoint}"
+    )

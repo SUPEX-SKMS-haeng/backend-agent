@@ -1,12 +1,35 @@
 """/app/api/routes/agent.py"""
 
+from contextlib import contextmanager
+
 from api.deps import CurrentUserDep, DatabaseDep
 from common.util.search_client import list_indexes, search_documents
+from core.config import get_setting
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
 from infra.database.repository import agent_log as agent_log_repo
 from service.agent.registry import get_agent, list_agents
 from service.model.agent import AgentRequest
+
+settings = get_setting()
+
+# Phoenix 트레이싱이 활성화된 경우에만 import
+if settings.PHOENIX_ENABLED:
+    from core.middleware.phoenix import phoenix_agent_context, phoenix_agent_stream
+    from openinference.instrumentation import using_attributes
+else:
+    # Phoenix 비활성화 시 no-op fallback
+    @contextmanager
+    def phoenix_agent_context(project_name: str):
+        yield
+
+    async def phoenix_agent_stream(project_name, gen):
+        async for item in gen:
+            yield item
+
+    @contextmanager
+    def using_attributes(**kwargs):
+        yield
 
 router = APIRouter()
 
@@ -91,7 +114,17 @@ async def search(query: str = Query(..., description="검색 쿼리"), top: int 
 async def invoke(request: AgentRequest, current_user: CurrentUserDep, db: DatabaseDep):
     """비스트리밍 응답"""
     agent = get_agent(request.agent_name, request.version)
-    response = await agent.invoke(request, current_user, db=db, response_mode="invoke")
+    project = f"{agent.name}-{agent.version}"
+    user_id = current_user.get("user_id", "")
+
+    with phoenix_agent_context(project), using_attributes(
+        session_id=f"{user_id}",
+        user_id=user_id,
+        metadata={"agent_name": agent.name, "agent_version": agent.version},
+        tags=[agent.name, agent.version, project],
+    ):
+        response = await agent.invoke(request, current_user, db=db, response_mode="invoke")
+
     return {"success": True, "data": response.model_dump()}
 
 
@@ -99,17 +132,42 @@ async def invoke(request: AgentRequest, current_user: CurrentUserDep, db: Databa
 async def stream(request: AgentRequest, current_user: CurrentUserDep, db: DatabaseDep):
     """스트리밍 응답"""
     agent = get_agent(request.agent_name, request.version)
-    return StreamingResponse(
-        agent.stream(request, current_user, db=db, response_mode="stream"),
-        media_type="text/event-stream",
-    )
+    project = f"{agent.name}-{agent.version}"
+    user_id = current_user.get("user_id", "")
+
+    async def _traced_stream():
+        with using_attributes(
+            session_id=f"{user_id}",
+            user_id=user_id,
+            metadata={"agent_name": agent.name, "agent_version": agent.version},
+            tags=[agent.name, agent.version, project],
+        ):
+            async for chunk in phoenix_agent_stream(
+                project, agent.stream(request, current_user, db=db, response_mode="stream")
+            ):
+                yield chunk
+
+    return StreamingResponse(_traced_stream(), media_type="text/event-stream")
 
 
 @router.post("/stream/post-process")
 async def post_process_stream(request: AgentRequest, current_user: CurrentUserDep, db: DatabaseDep):
     """후처리 후 스트리밍"""
     agent = get_agent(request.agent_name, request.version)
-    return StreamingResponse(
-        agent.post_process_stream(request, current_user, db=db, response_mode="post_process"),
-        media_type="text/event-stream",
-    )
+    project = f"{agent.name}-{agent.version}"
+    user_id = current_user.get("user_id", "")
+
+    async def _traced_stream():
+        with using_attributes(
+            session_id=f"{user_id}",
+            user_id=user_id,
+            metadata={"agent_name": agent.name, "agent_version": agent.version},
+            tags=[agent.name, agent.version, project],
+        ):
+            async for chunk in phoenix_agent_stream(
+                project,
+                agent.post_process_stream(request, current_user, db=db, response_mode="post_process"),
+            ):
+                yield chunk
+
+    return StreamingResponse(_traced_stream(), media_type="text/event-stream")
