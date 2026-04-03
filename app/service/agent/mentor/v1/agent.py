@@ -1,17 +1,11 @@
-"""/app/service/agent/rag/v3/agent.py
+"""/app/service/agent/mentor/v1/agent.py
 
-SK 멘토링 에이전트 (v3)
+SK 멘토링 에이전트 (mentor/v1)
 
 LangGraph 기반 7단계 Agentic RAG:
   intent_classify → query_expand → retrieve → grade
     → (rewrite → query_expand → retrieve)*
     → generate → validate → END
-
-v2 대비 추가 사항:
-  - 인텐트 분류로 도메인별 검색 키워드 자동 확장
-  - 멀티 쿼리 검색 (인텐트 접두어 조합)
-  - 답변 생성 후 SKMS 철학 준수 여부 검증 (validate)
-  - LLM Gateway PERSONA 주입 대상 = generate 노드만 (나머지는 내부 판단용)
 """
 
 from typing import AsyncGenerator
@@ -21,8 +15,8 @@ from common.util.search_client import search_documents
 from core.config import get_setting
 from core.log.logging import get_logging
 from service.agent.base import BaseAgent
-from service.agent.rag.v3.graph import build_mentor_graph
-from service.agent.rag.v3.prompts import GENERATE_PROMPT, GRADE_PROMPT, INTENT_PROMPT, REWRITE_PROMPT
+from service.agent.mentor.v1.graph import build_mentor_graph
+from service.agent.mentor.v1.prompts import GENERATE_PROMPT, GRADE_PROMPT, INTENT_PROMPT, REWRITE_PROMPT
 from service.agent.registry import register
 from service.model.agent import AgentRequest, AgentResponse, ChatHistory
 from sqlalchemy.orm import Session
@@ -31,26 +25,38 @@ logger = get_logging()
 settings = get_setting()
 
 
-@register(name="mentor_agent", version="v1")
+@register(name="mentor", version="v1")
 class MentoringAgent(BaseAgent):
-    description = "LangGraph SK 멘토링 에이전트 — 인텐트 분류/멀티쿼리 검색/SKMS 검증 (v3)"
+    description = "LangGraph SK 멘토링 에이전트 — 인텐트 분류/멀티쿼리 검색/SKMS 검증"
 
     def _get_client(self) -> LLMGatewayClient:
         return LLMGatewayClient(llm_gateway_url=settings.LLM_GATEWAY_URL)
 
+    # 인텐트별 우선 검색 인덱스 매핑 (설정이 없으면 기본 인덱스 사용)
+    _INTENT_INDEX_MAP: dict[str, str | None] = {
+        "strategy": "skms-strategy",
+        "culture":  "skms-culture",
+        "crisis":   "skms-crisis",
+        "supex":    "skms-supex",
+        "hr":       "skms-hr",
+        "general":  None,  # 기본 인덱스
+    }
+
     async def _retrieve(self, query: str, metadata: dict | None = None) -> tuple[str, list[dict]]:
-        """Azure AI Search 문서 검색 (metadata에 intent 포함 가능)"""
-        return await search_documents(query)
+        """Azure AI Search 문서 검색 — metadata.intent로 인덱스 선택"""
+        intent = (metadata or {}).get("intent", "general")
+        index_name = self._INTENT_INDEX_MAP.get(intent)  # None이면 settings 기본값 사용
+        return await search_documents(query, index_name=index_name)
 
     def _build_log_metadata(self, graph_result: dict) -> dict:
         """로그에 저장할 메타데이터 구성"""
         return {
-            "intent":         graph_result.get("intent", ""),
-            "confidence":     graph_result.get("intent_confidence", 0.0),
-            "grade":          graph_result.get("grade_decision", ""),
-            "retry_count":    graph_result.get("retry_count", 0),
-            "validate":       graph_result.get("validate_result", ""),
-            "sources_count":  len(graph_result.get("sources", [])),
+            "intent":        graph_result.get("intent", ""),
+            "confidence":    graph_result.get("intent_confidence", 0.0),
+            "grade":         graph_result.get("grade_decision", ""),
+            "retry_count":   graph_result.get("retry_count", 0),
+            "validate":      graph_result.get("validate_result", ""),
+            "sources_count": len(graph_result.get("sources", [])),
             "prompts": {
                 "intent":   INTENT_PROMPT,
                 "grade":    GRADE_PROMPT,
@@ -74,25 +80,24 @@ class MentoringAgent(BaseAgent):
         )
 
         initial_state = {
-            "query":            request.query,
-            "original_query":   request.query,
+            "query":             request.query,
+            "original_query":    request.query,
             "chat_history": [
                 {"role": msg.role.value, "content": msg.content}
                 for msg in request.chat_history
             ],
-            # 초기값 — 각 노드에서 채워짐
-            "intent":           "general",
+            "intent":            "general",
             "intent_confidence": 0.0,
-            "search_queries":   [],
-            "context":          "",
-            "sources":          [],
-            "grade_decision":   "insufficient",
-            "rewritten_query":  "",
-            "retry_count":      0,
-            "answer":           "",
-            "validate_result":  "pass",
-            "validate_reason":  "",
-            "validate_count":   0,
+            "search_queries":    [],
+            "context":           "",
+            "sources":           [],
+            "grade_decision":    "insufficient",
+            "rewritten_query":   "",
+            "retry_count":       0,
+            "answer":            "",
+            "validate_result":   "pass",
+            "validate_reason":   "",
+            "validate_count":    0,
         }
 
         return await graph.ainvoke(initial_state)
@@ -103,13 +108,11 @@ class MentoringAgent(BaseAgent):
         """비스트리밍: 그래프 실행 → DB 저장 → JSON 응답"""
         result = await self._run_graph(request, user)
 
-        log_metadata = self._build_log_metadata(result)
-
         self._save_log(
             db, request, user, response_mode,
             answer=result.get("answer", ""),
             sources=result.get("sources", []),
-            log_metadata=log_metadata,
+            log_metadata=self._build_log_metadata(result),
         )
 
         return AgentResponse(
@@ -170,7 +173,6 @@ class MentoringAgent(BaseAgent):
         ):
             yield chunk
 
-        # DB 저장 (스트리밍이라 answer는 그래프 비스트리밍 결과 사용)
         self._save_log(
             db, request, user, response_mode,
             answer=result.get("answer", ""),

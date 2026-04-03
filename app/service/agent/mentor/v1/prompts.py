@@ -1,6 +1,6 @@
-"""/app/service/agent/rag/v3/prompts.py
+"""/app/service/agent/mentor/v1/prompts.py
 
-SK 멘토링 에이전트 (v3) 프롬프트 모음
+SK 멘토링 에이전트 프롬프트 모음
 
 - INTENT_PROMPT  : 질문 유형 분류 (strategy / culture / crisis / supex / hr / general)
 - GRADE_PROMPT   : 검색 문서 관련성 평가 (sufficient / insufficient)

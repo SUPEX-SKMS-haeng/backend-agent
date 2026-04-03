@@ -1,6 +1,6 @@
-"""/app/service/agent/rag/v3/graph.py
+"""/app/service/agent/mentor/v1/graph.py
 
-SK 멘토링 에이전트 — LangGraph 워크플로우 (v3)
+SK 멘토링 에이전트 — LangGraph 워크플로우
 
 흐름:
   START
@@ -24,7 +24,7 @@ from langgraph.graph import END, StateGraph
 
 from common.util.llm_gateway_client import LLMGatewayClient
 from core.log.logging import get_logging
-from service.agent.rag.v3.prompts import (
+from service.agent.mentor.v1.prompts import (
     GENERATE_PROMPT,
     GRADE_PROMPT,
     INTENT_PROMPT,
@@ -91,7 +91,7 @@ def build_mentor_graph(
     provider: str,
     model: str,
     retrieve_fn,
-    agent_name: str = "mentor_agent-v1",
+    agent_name: str = "mentor-v1",
 ) -> StateGraph:
     """
     SK 멘토링 에이전트 그래프를 빌드합니다.
