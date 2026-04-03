@@ -36,7 +36,7 @@ def get_current_user(
             "user_id": user_id,
             "email": email,
             "department": department,
-            "username": unquote(username),
+            "username": unquote(username) if username else None,
             "company": company,
             "role": UserOrganizationRole.model_validate_json(unquote(role)) if role else UserOrganizationRole(),
         }
