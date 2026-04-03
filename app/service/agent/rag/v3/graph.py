@@ -1,0 +1,342 @@
+"""/app/service/agent/rag/v3/graph.py
+
+SK 멘토링 에이전트 — LangGraph 워크플로우 (v3)
+
+흐름:
+  START
+    → intent_classify  (LLM: 질문 유형 분류)
+    → query_expand     (규칙 기반: 인텐트별 검색 쿼리 확장)
+    → retrieve         (문서 검색)
+    → grade            (LLM: 검색 결과 평가)
+    ┌─ sufficient  → generate   (LLM: 최종 답변 생성)
+    │                 → validate (LLM: SKMS 준수 여부 검증)
+    │                 ┌─ pass    → END
+    │                 └─ fail    → generate (validate_reason 반영 재생성, 1회 한도)
+    └─ insufficient → rewrite   (LLM: 쿼리 리라이팅, 최대 2회)
+                      → retrieve (재검색 루프)
+                      (한도 초과 시 → generate fallback)
+"""
+
+import json
+from typing import TypedDict
+
+from langgraph.graph import END, StateGraph
+
+from common.util.llm_gateway_client import LLMGatewayClient
+from core.log.logging import get_logging
+from service.agent.rag.v3.prompts import (
+    GENERATE_PROMPT,
+    GRADE_PROMPT,
+    INTENT_PROMPT,
+    REWRITE_PROMPT,
+    VALIDATE_PROMPT,
+)
+from service.model.agent import ChatHistory
+
+logger = get_logging()
+
+MAX_RETRIES = 2    # 재검색 최대 횟수
+MAX_VALIDATE = 1   # 검증 실패 후 재생성 최대 횟수
+
+# ── 인텐트별 검색 쿼리 접두어 (규칙 기반, LLM 비용 없음) ─────
+_INTENT_SEARCH_PREFIX: dict[str, list[str]] = {
+    "strategy": ["전략", "사업 방향"],
+    "culture":  ["조직문화", "VWBE 구성원"],
+    "crisis":   ["위기", "리스크 관리"],
+    "supex":    ["SUPEX 패기", "도전 목표"],
+    "hr":       ["인재 육성", "리더십"],
+    "general":  [],
+}
+
+
+class MentoringState(TypedDict):
+    """멘토링 에이전트 그래프 전체 상태"""
+
+    # ── 입력 ─────────────────────────────────────────────────
+    query: str
+    original_query: str
+    chat_history: list[dict]
+
+    # ── 노드 1: intent_classify ──────────────────────────────
+    intent: str            # strategy | culture | crisis | supex | hr | general
+    intent_confidence: float
+
+    # ── 노드 2: query_expand ─────────────────────────────────
+    search_queries: list[str]
+
+    # ── 노드 3: retrieve ─────────────────────────────────────
+    context: str           # 검색 결과 합산 컨텍스트 문자열
+    sources: list[dict]    # 출처 목록
+
+    # ── 노드 4: grade ────────────────────────────────────────
+    grade_decision: str    # "sufficient" | "insufficient"
+
+    # ── 노드 5: rewrite ──────────────────────────────────────
+    rewritten_query: str
+    retry_count: int
+
+    # ── 노드 6: generate ─────────────────────────────────────
+    answer: str
+
+    # ── 노드 7: validate ─────────────────────────────────────
+    validate_result: str   # "pass" | "fail"
+    validate_reason: str
+    validate_count: int
+
+
+def build_mentor_graph(
+    client: LLMGatewayClient,
+    user_id: str,
+    org_id: str | None,
+    provider: str,
+    model: str,
+    retrieve_fn,
+    agent_name: str = "mentor_agent-v1",
+) -> StateGraph:
+    """
+    SK 멘토링 에이전트 그래프를 빌드합니다.
+
+    Args:
+        client      : LLM Gateway 클라이언트
+        user_id     : 사용자 ID
+        org_id      : 조직 ID
+        provider    : LLM 프로바이더
+        model       : 모델명
+        retrieve_fn : 검색 함수 async def fn(query, metadata) -> (context_str, sources_list)
+        agent_name  : LLM Gateway 에이전트 이름 (프롬프트 조회 키)
+    """
+
+    async def _call_llm(messages: list[ChatHistory]) -> str:
+        """LLM Gateway 비스트리밍 호출 헬퍼 (내부 판단 노드 공통 사용)"""
+        result = await client.call_completions_non_stream(
+            user_id=user_id,
+            org_id=org_id,
+            provider=provider,
+            model=model,
+            messages=messages,
+            prompt_variables=None,
+            agent_name=agent_name,
+        )
+        if "choices" in result:
+            return result["choices"][0].get("message", {}).get("content", "")
+        return result.get("content", "")
+
+    # ── 노드 1: 인텐트 분류 ─────────────────────────────────
+
+    async def intent_classify(state: MentoringState) -> MentoringState:
+        """LLM으로 질문 유형 분류 → intent, intent_confidence"""
+        prompt = INTENT_PROMPT.format(query=state["query"])
+        messages = [ChatHistory(role="user", content=prompt)]
+
+        raw = await _call_llm(messages)
+        try:
+            result = json.loads(raw)
+            intent = result.get("intent", "general")
+            confidence = float(result.get("confidence", 0.5))
+        except (json.JSONDecodeError, ValueError):
+            # 파싱 실패 시 general로 폴백
+            intent = "general"
+            confidence = 0.5
+
+        # 유효하지 않은 카테고리 방어
+        if intent not in _INTENT_SEARCH_PREFIX:
+            intent = "general"
+
+        state["intent"] = intent
+        state["intent_confidence"] = confidence
+        logger.info(f"[intent_classify] intent={intent} confidence={confidence:.2f}")
+        return state
+
+    # ── 노드 2: 쿼리 확장 (규칙 기반, LLM 미사용) ──────────
+
+    async def query_expand(state: MentoringState) -> MentoringState:
+        """인텐트별 고정 접두어로 검색 쿼리 확장 (비용 없음)"""
+        query = state.get("rewritten_query") or state["original_query"]
+        prefixes = _INTENT_SEARCH_PREFIX.get(state["intent"], [])
+
+        search_queries = [query]
+        for prefix in prefixes[:2]:
+            search_queries.append(f"{prefix} {query}")
+
+        state["search_queries"] = search_queries
+        logger.info(f"[query_expand] {len(search_queries)} queries for intent={state['intent']}")
+        return state
+
+    # ── 노드 3: 문서 검색 ────────────────────────────────────
+
+    async def retrieve(state: MentoringState) -> MentoringState:
+        """확장된 쿼리로 순차 검색 후 컨텍스트/출처 누산"""
+        all_context_parts: list[str] = []
+        all_sources: list[dict] = []
+        seen_titles: set[str] = set()
+
+        for query in state["search_queries"]:
+            ctx, srcs = await retrieve_fn(query, {"intent": state["intent"]})
+            if ctx:
+                all_context_parts.append(ctx)
+            for src in srcs:
+                title = src.get("title", "")
+                if title not in seen_titles:
+                    seen_titles.add(title)
+                    all_sources.append(src)
+
+        state["context"] = "\n\n---\n\n".join(all_context_parts)
+        state["sources"] = all_sources
+        logger.info(f"[retrieve] queries={len(state['search_queries'])} sources={len(all_sources)}")
+        return state
+
+    # ── 노드 4: 검색 결과 평가 ───────────────────────────────
+
+    async def grade(state: MentoringState) -> MentoringState:
+        """검색 컨텍스트가 질문에 답하기 충분한지 LLM으로 판단"""
+        prompt = GRADE_PROMPT.format(
+            query=state["query"],
+            context=state["context"][:2000],  # 평가용 2000자 제한
+        )
+        messages = [ChatHistory(role="user", content=prompt)]
+
+        decision = await _call_llm(messages)
+        decision = decision.strip().lower()
+
+        state["grade_decision"] = "sufficient" if "sufficient" in decision else "insufficient"
+        logger.info(
+            f"[grade] → {state['grade_decision']} "
+            f"(retry={state['retry_count']}, sources={len(state['sources'])})"
+        )
+        return state
+
+    # ── 노드 5: 쿼리 리라이팅 ───────────────────────────────
+
+    async def rewrite(state: MentoringState) -> MentoringState:
+        """검색 결과 불충분 시 SKMS 키워드 기반으로 쿼리 재작성"""
+        prompt = REWRITE_PROMPT.format(query=state["query"])
+        messages = [ChatHistory(role="user", content=prompt)]
+
+        rewritten = await _call_llm(messages)
+        rewritten = rewritten.strip()
+
+        state["rewritten_query"] = rewritten
+        state["retry_count"] += 1
+        # 재검색을 위해 이전 결과 초기화
+        state["context"] = ""
+        state["sources"] = []
+
+        logger.info(
+            f"[rewrite] attempt={state['retry_count']} "
+            f"'{state['original_query'][:20]}' → '{rewritten[:30]}'"
+        )
+        return state
+
+    # ── 노드 6: 최종 답변 생성 (PERSONA 주입 대상) ──────────
+
+    async def generate(state: MentoringState) -> MentoringState:
+        """
+        검색 컨텍스트 + 질문으로 멘토링 답변 생성.
+        LLM Gateway가 GENERATE_PROMPT 앞에 PERSONA/GUARDRAIL/RAG/FEWSHOT 자동 삽입.
+        """
+        messages = [ChatHistory(role="system", content=GENERATE_PROMPT)]
+
+        # 이전 대화 이력 (최근 6턴)
+        for msg in state["chat_history"][-6:]:
+            messages.append(ChatHistory(role=msg["role"], content=msg["content"]))
+
+        # 검증 실패 피드백이 있으면 재생성 요청으로 추가
+        if state.get("validate_reason"):
+            messages.append(ChatHistory(
+                role="system",
+                content=f"[이전 답변 수정 요청] {state['validate_reason']}",
+            ))
+
+        # 참고 자료 + 질문 구성 (LLM Gateway RAG 프롬프트가 이 구조를 처리)
+        context = state.get("context", "")
+        query = state["original_query"]
+        if context:
+            user_content = f"## 참고 자료\n{context}\n\n## 질문\n{query}"
+        else:
+            user_content = f"## 질문\n{query}"
+
+        messages.append(ChatHistory(role="user", content=user_content))
+
+        state["answer"] = await _call_llm(messages)
+        logger.info(f"[generate] answer_length={len(state['answer'])} validate_count={state['validate_count']}")
+        return state
+
+    # ── 노드 7: 답변 검증 ────────────────────────────────────
+
+    async def validate(state: MentoringState) -> MentoringState:
+        """생성된 답변이 SKMS 철학 및 사실 관계에 부합하는지 검증"""
+        # 이미 재생성을 1회 수행했으면 무조건 pass 처리 (무한루프 방지)
+        if state.get("validate_count", 0) >= MAX_VALIDATE:
+            state["validate_result"] = "pass"
+            state["validate_reason"] = ""
+            logger.info("[validate] max_validate reached → force pass")
+            return state
+
+        prompt = VALIDATE_PROMPT.format(
+            context=state.get("context", "")[:1000],
+            answer=state["answer"],
+        )
+        messages = [ChatHistory(role="user", content=prompt)]
+
+        raw = await _call_llm(messages)
+        raw = raw.strip().lower()
+
+        if raw.startswith("fail"):
+            reason = raw.split(":", 1)[1].strip() if ":" in raw else "SKMS 철학 위반"
+            state["validate_result"] = "fail"
+            state["validate_reason"] = reason
+        else:
+            state["validate_result"] = "pass"
+            state["validate_reason"] = ""
+
+        state["validate_count"] = state.get("validate_count", 0) + 1
+        logger.info(f"[validate] result={state['validate_result']} count={state['validate_count']}")
+        return state
+
+    # ── 조건부 엣지 ──────────────────────────────────────────
+
+    def after_grade(state: MentoringState) -> str:
+        if state["grade_decision"] == "sufficient":
+            return "generate"
+        if state["retry_count"] >= MAX_RETRIES:
+            logger.info(f"[grade] max retries ({MAX_RETRIES}) → fallback generate")
+            return "generate"
+        return "rewrite"
+
+    def after_validate(state: MentoringState) -> str:
+        if state["validate_result"] == "pass":
+            return END
+        return "generate"  # validate_reason 포함 재생성
+
+    # ── 그래프 조립 ──────────────────────────────────────────
+
+    graph = StateGraph(MentoringState)
+
+    graph.add_node("intent_classify", intent_classify)
+    graph.add_node("query_expand",    query_expand)
+    graph.add_node("retrieve",        retrieve)
+    graph.add_node("grade",           grade)
+    graph.add_node("rewrite",         rewrite)
+    graph.add_node("generate",        generate)
+    graph.add_node("validate",        validate)
+
+    graph.set_entry_point("intent_classify")
+
+    graph.add_edge("intent_classify", "query_expand")
+    graph.add_edge("query_expand",    "retrieve")
+    graph.add_edge("retrieve",        "grade")
+
+    graph.add_conditional_edges("grade", after_grade, {
+        "generate": "generate",
+        "rewrite":  "rewrite",
+    })
+
+    graph.add_edge("rewrite",  "query_expand")   # 리라이팅 후 쿼리 재확장
+    graph.add_edge("generate", "validate")
+
+    graph.add_conditional_edges("validate", after_validate, {
+        END:        END,
+        "generate": "generate",
+    })
+
+    return graph.compile()
