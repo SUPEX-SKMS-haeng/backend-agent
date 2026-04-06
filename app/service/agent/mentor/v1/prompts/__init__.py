@@ -1,0 +1,18 @@
+"""/app/service/agent/mentor/v1/prompts/__init__.py
+
+SK 멘토링 에이전트 프롬프트 모음 — re-export
+"""
+
+from service.agent.mentor.v1.prompts.classifier import INTENT_PROMPT
+from service.agent.mentor.v1.prompts.generator import GENERATE_PROMPT
+from service.agent.mentor.v1.prompts.grader import GRADE_PROMPT
+from service.agent.mentor.v1.prompts.rewriter import REWRITE_PROMPT
+from service.agent.mentor.v1.prompts.validator import VALIDATE_PROMPT
+
+__all__ = [
+    "INTENT_PROMPT",
+    "GRADE_PROMPT",
+    "REWRITE_PROMPT",
+    "GENERATE_PROMPT",
+    "VALIDATE_PROMPT",
+]
