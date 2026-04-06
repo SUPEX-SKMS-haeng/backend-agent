@@ -35,11 +35,11 @@ class MentoringAgent(BaseAgent):
 
     # 인텐트별 우선 검색 인덱스 매핑 (설정이 없으면 기본 인덱스 사용)
     _INTENT_INDEX_MAP: dict[str, str | None] = {
-        "strategy": "skms-strategy",
-        "culture":  "skms-culture",
-        "crisis":   "skms-crisis",
-        "supex":    "skms-supex",
-        "hr":       "skms-hr",
+        "strategy": "sk_books",
+        "culture":  "sk_history_archive",
+        "crisis":   "sk_skms",
+        "supex":    None,  # 전용 인덱스 미생성 → 기본 인덱스 사용
+        "hr":       None,  # 전용 인덱스 미생성 → 기본 인덱스 사용
         "general":  None,  # 기본 인덱스
     }
 
