@@ -66,10 +66,12 @@ async def search_documents(
             score = doc.get("@search.score", 0)
 
             if content:
-                context_parts.append(f"[{title}]\n{content}")
+                context_parts.append(f"[자료 {i + 1}: {title}]\n{content}")
                 sources.append({
+                    "index": i + 1,
                     "title": title,
                     "score": score,
+                    "content": content,
                     "content_preview": content[:200],
                 })
 
