@@ -57,6 +57,9 @@ class MentoringState(TypedDict):
     original_query: str
     chat_history: list[dict]
 
+    # ── 라우팅 ───────────────────────────────────────────────
+    route: str             # "new_query" | "followup"
+
     # ── 노드 1: intent_classify ──────────────────────────────
     intent: str            # strategy | culture | crisis | supex | hr | general
     intent_confidence: float
@@ -120,6 +123,36 @@ def build_mentor_graph(
         if "choices" in result:
             return result["choices"][0].get("message", {}).get("content", "")
         return result.get("content", "")
+
+    # ── 노드 0: 대화 라우팅 ─────────────────────────────────
+
+    async def conversation_router(state: MentoringState) -> MentoringState:
+        """
+        새 질문인지 핑퐁 답변인지 판단.
+        - chat_history 없음 → new_query
+        - 마지막 assistant 발화가 질문으로 끝났고 + 현재 query가 짧으면 → followup
+        - 그 외 → new_query
+        """
+        history = state.get("chat_history", [])
+        query = state["query"]
+
+        if not history:
+            state["route"] = "new_query"
+            return state
+
+        last_assistant = next(
+            (m["content"] for m in reversed(history) if m["role"] == "assistant"),
+            ""
+        )
+        is_question_end = last_assistant.rstrip().endswith("?") or last_assistant.rstrip().endswith("까?")
+
+        if is_question_end and len(query.strip()) < 80:
+            state["route"] = "followup"
+        else:
+            state["route"] = "new_query"
+
+        logger.info(f"[conversation_router] route={state['route']} query_len={len(query)}")
+        return state
 
     # ── 노드 1: 인텐트 분류 ─────────────────────────────────
 
@@ -312,6 +345,7 @@ def build_mentor_graph(
 
     graph = StateGraph(MentoringState)
 
+    graph.add_node("conversation_router", conversation_router)
     graph.add_node("intent_classify", intent_classify)
     graph.add_node("query_expand",    query_expand)
     graph.add_node("retrieve",        retrieve)
@@ -320,7 +354,16 @@ def build_mentor_graph(
     graph.add_node("generate",        generate)
     graph.add_node("validate",        validate)
 
-    graph.set_entry_point("intent_classify")
+    graph.set_entry_point("conversation_router")
+
+    graph.add_conditional_edges(
+        "conversation_router",
+        lambda s: s["route"],
+        {
+            "new_query": "intent_classify",
+            "followup":  "generate",   # RAG 전체 스킵, 이전 context 재사용
+        }
+    )
 
     graph.add_edge("intent_classify", "query_expand")
     graph.add_edge("query_expand",    "retrieve")
