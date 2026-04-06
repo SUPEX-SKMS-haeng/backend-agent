@@ -18,6 +18,8 @@ SK 멘토링 에이전트 — LangGraph 워크플로우
 """
 
 import json
+import random
+import re
 
 from langgraph.graph import END, StateGraph
 
@@ -224,12 +226,56 @@ def build_mentor_graph(
 
     # ── 노드 6: 최종 답변 생성 (PERSONA 주입 대상) ──────────
 
+    def _reinforce_ije(text: str) -> str:
+        """'이제' 접속어가 부족하면 자연스러운 위치에 삽입"""
+        sentences = text.split('. ')
+        ije_count = text.count('이제')
+        target_count = max(1, len(sentences) // 4)  # 4문장당 최소 1회
+
+        if ije_count >= target_count:
+            return text
+
+        # 삽입 가능한 접속어 패턴
+        ije_variants = ['이제 ', '이제, ', '이제 말이야, ']
+        transition_words = ['그래서', '그런데', '또', '그리고']
+
+        inserted = 0
+        for i in range(3, len(sentences), 4):  # 3번째 문장부터 4문장 간격
+            if inserted >= (target_count - ije_count):
+                break
+            sentence = sentences[i].lstrip()
+            # 이미 접속어로 시작하면 교체, 아니면 앞에 추가
+            has_transition = any(sentence.startswith(tw) for tw in transition_words)
+            if has_transition:
+                for tw in transition_words:
+                    if sentence.startswith(tw):
+                        sentences[i] = sentence.replace(tw, random.choice(ije_variants), 1)
+                        inserted += 1
+                        break
+            elif not sentence.startswith('이제'):
+                sentences[i] = random.choice(ije_variants) + sentence
+                inserted += 1
+
+        return '. '.join(sentences)
+
     async def generate(state: MentoringState) -> MentoringState:
         """
         검색 컨텍스트 + 질문으로 멘토링 답변 생성.
         LLM Gateway가 GENERATE_PROMPT 앞에 PERSONA/GUARDRAIL/RAG/FEWSHOT 자동 삽입.
         """
-        messages = [ChatHistory(role="system", content=GENERATE_PROMPT)]
+        # 동적 프롬프트 주입: 아키타입 이력 및 턴 카운트
+        turn_count = state.get("turn_count", 0)
+        previous_archetypes = state.get("previous_archetypes", [])
+
+        dynamic_prompt = GENERATE_PROMPT.format(
+            turn_count=turn_count,
+            previous_archetypes=previous_archetypes,
+            chat_history="",  # chat_history는 메시지로 별도 주입
+            context=state.get("context", ""),
+            query=state["original_query"],
+        )
+
+        messages = [ChatHistory(role="system", content=dynamic_prompt)]
 
         # 이전 대화 이력 (최근 6턴)
         for msg in state["chat_history"][-6:]:
@@ -252,8 +298,29 @@ def build_mentor_graph(
 
         messages.append(ChatHistory(role="user", content=user_content))
 
-        state["answer"] = await _call_llm(messages)
-        logger.info(f"[generate] answer_length={len(state['answer'])} validate_count={state['validate_count']}")
+        answer = await _call_llm(messages)
+
+        # 아키타입 태그 파싱 및 제거
+        archetype_match = re.search(r'<!--archetype:(\w+)-->', answer)
+        current_archetype = archetype_match.group(1) if archetype_match else "standard"
+        clean_answer = re.sub(r'<!--archetype:\w+-->', '', answer).strip()
+
+        # "이제" 접속어 후처리 보강
+        clean_answer = _reinforce_ije(clean_answer)
+
+        # state 업데이트
+        state["answer"] = clean_answer
+        state["response_archetype"] = current_archetype
+        prev = state.get("previous_archetypes", [])
+        prev.append(current_archetype)
+        state["previous_archetypes"] = prev[-3:]  # 최근 3턴만 유지
+        state["turn_count"] = state.get("turn_count", 0) + 1
+
+        logger.info(
+            f"[generate] answer_length={len(clean_answer)} "
+            f"archetype={current_archetype} turn={state['turn_count']} "
+            f"validate_count={state['validate_count']}"
+        )
         return state
 
     # ── 노드 7: 답변 검증 ────────────────────────────────────
@@ -270,6 +337,7 @@ def build_mentor_graph(
         prompt = VALIDATE_PROMPT.format(
             context=state.get("context", "")[:1000],
             answer=state["answer"],
+            response_archetype=state.get("response_archetype", "standard"),
         )
         messages = [ChatHistory(role="user", content=prompt)]
 

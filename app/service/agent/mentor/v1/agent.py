@@ -79,13 +79,18 @@ class MentoringAgent(BaseAgent):
             agent_name=f"{self.name}-{self.version}",
         )
 
+        chat_history = [
+            {"role": msg.role.value, "content": msg.content}
+            for msg in request.chat_history
+        ]
+
+        # chat_history에서 사용자 턴 수 역산
+        user_turn_count = len([m for m in chat_history if m["role"] == "user"])
+
         initial_state = {
             "query":             request.query,
             "original_query":    request.query,
-            "chat_history": [
-                {"role": msg.role.value, "content": msg.content}
-                for msg in request.chat_history
-            ],
+            "chat_history":      chat_history,
             "intent":            "general",
             "intent_confidence": 0.0,
             "search_queries":    [],
@@ -98,6 +103,10 @@ class MentoringAgent(BaseAgent):
             "validate_result":   "pass",
             "validate_reason":   "",
             "validate_count":    0,
+            # 응답 아키타입 관리
+            "response_archetype":  "",
+            "previous_archetypes": [],
+            "turn_count":          user_turn_count,
         }
 
         return await graph.ainvoke(initial_state)
