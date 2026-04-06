@@ -1,7 +1,10 @@
 """/app/infra/database/schema/agent_log.py"""
 
 import datetime
-from datetime import timezone
+
+from zoneinfo import ZoneInfo
+
+KST = ZoneInfo("Asia/Seoul")
 
 from infra.database.base import Base
 from sqlalchemy import BIGINT, TEXT, Index, String
@@ -29,7 +32,7 @@ class AgentChatLog(Base):
     )
     provider: Mapped[str | None] = mapped_column(String(100), nullable=True, comment="LLM 프로바이더")
     model: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="사용 모델명")
-    create_dt: Mapped[datetime.datetime] = mapped_column(default=lambda: datetime.datetime.now(timezone.utc))
+    create_dt: Mapped[datetime.datetime] = mapped_column(default=lambda: datetime.datetime.now(KST))
 
     __table_args__ = (
         Index("ix_agent_chat_log_trace_id", "trace_id"),
