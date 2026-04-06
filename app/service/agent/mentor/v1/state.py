@@ -47,3 +47,4 @@ class MentoringState(TypedDict):
     response_archetype: str          # 직전 턴에 사용한 응답 아키타입 (초기값: "")
     previous_archetypes: list[str]   # 최근 3턴의 아키타입 이력 (초기값: [])
     turn_count: int                  # 현재 대화 턴 수 (초기값: 0)
+    previous_answer: str             # 직전 턴의 답변 원문 (초기값: "")

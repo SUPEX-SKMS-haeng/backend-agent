@@ -8,6 +8,7 @@ LangGraph 기반 7단계 Agentic RAG:
     → generate → validate → END
 """
 
+import time
 from typing import AsyncGenerator
 
 from common.util.llm_gateway_client import LLMGatewayClient
@@ -107,6 +108,7 @@ class MentoringAgent(BaseAgent):
             "response_archetype":  "",
             "previous_archetypes": [],
             "turn_count":          user_turn_count,
+            "previous_answer":     "",
         }
 
         return await graph.ainvoke(initial_state)
@@ -115,7 +117,9 @@ class MentoringAgent(BaseAgent):
         self, request: AgentRequest, user: dict, *, db: Session, response_mode: str
     ) -> AgentResponse:
         """비스트리밍: 그래프 실행 → DB 저장 → JSON 응답"""
+        start_time = time.time()
         result = await self._run_graph(request, user)
+        elapsed_seconds = round(time.time() - start_time, 1)
 
         self._save_log(
             db, request, user, response_mode,
@@ -128,10 +132,11 @@ class MentoringAgent(BaseAgent):
             answer=result.get("answer", ""),
             sources=result.get("sources", []),
             metadata={
-                "intent":      result.get("intent", ""),
-                "grade":       result.get("grade_decision", ""),
-                "retry_count": result.get("retry_count", 0),
-                "validate":    result.get("validate_result", ""),
+                "intent":          result.get("intent", ""),
+                "grade":           result.get("grade_decision", ""),
+                "retry_count":     result.get("retry_count", 0),
+                "validate":        result.get("validate_result", ""),
+                "elapsed_seconds": elapsed_seconds,
             },
         )
 
@@ -139,7 +144,10 @@ class MentoringAgent(BaseAgent):
         self, request: AgentRequest, user: dict, *, db: Session, response_mode: str
     ) -> AsyncGenerator[str, None]:
         """스트리밍: 그래프 전체 실행 → 검증된 답변을 OpenAI SSE 청크 형식으로 스트리밍"""
+        start_time = time.time()
         result = await self._run_graph(request, user)
+        elapsed_seconds = round(time.time() - start_time, 1)
+
         sources = result.get("sources", [])
         answer = result.get("answer", "")
 
@@ -149,10 +157,11 @@ class MentoringAgent(BaseAgent):
         yield self._format_sse({
             "type": "metadata",
             "metadata": {
-                "intent":      result.get("intent", ""),
-                "grade":       result.get("grade_decision", ""),
-                "retry_count": result.get("retry_count", 0),
-                "validate":    result.get("validate_result", ""),
+                "intent":          result.get("intent", ""),
+                "grade":           result.get("grade_decision", ""),
+                "retry_count":     result.get("retry_count", 0),
+                "validate":        result.get("validate_result", ""),
+                "elapsed_seconds": elapsed_seconds,
             },
         })
 

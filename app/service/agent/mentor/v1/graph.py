@@ -267,9 +267,14 @@ def build_mentor_graph(
         turn_count = state.get("turn_count", 0)
         previous_archetypes = state.get("previous_archetypes", [])
 
+        # 직전 턴 질문 종결 여부 계산
+        prev_answer = state.get("previous_answer", "")
+        prev_ends_with_question = "YES" if prev_answer.strip().endswith("?") else "NO"
+
         dynamic_prompt = GENERATE_PROMPT.format(
             turn_count=turn_count,
             previous_archetypes=previous_archetypes,
+            prev_ends_with_question=prev_ends_with_question,
             chat_history="",  # chat_history는 메시지로 별도 주입
             context=state.get("context", ""),
             query=state["original_query"],
@@ -310,6 +315,7 @@ def build_mentor_graph(
 
         # state 업데이트
         state["answer"] = clean_answer
+        state["previous_answer"] = clean_answer
         state["response_archetype"] = current_archetype
         prev = state.get("previous_archetypes", [])
         prev.append(current_archetype)
