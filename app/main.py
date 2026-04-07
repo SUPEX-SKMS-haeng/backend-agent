@@ -1,5 +1,6 @@
 """/app/main.py"""
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -12,6 +13,27 @@ from fastapi.routing import APIRoute
 
 settings = get_setting()
 logger = get_logging()
+
+
+async def warmup_llm() -> None:
+    """앱 시작 시 Azure OpenAI TCP 연결을 미리 수립합니다."""
+    try:
+        from common.util.llm_gateway_client import LLMGatewayClient
+        from service.model.agent import ChatHistory
+
+        client = LLMGatewayClient(llm_gateway_url=settings.LLM_GATEWAY_URL)
+        await client.call_completions_non_stream(
+            user_id="system",
+            org_id=None,
+            provider="azure-openai",
+            model="gpt-4o",
+            messages=[ChatHistory(role="user", content="ping")],
+            prompt_variables=None,
+            agent_name="warmup",
+        )
+        logger.info("[warmup] LLM connection pre-warmed successfully")
+    except Exception as e:
+        logger.warning(f"[warmup] pre-warm failed (non-critical, app continues): {e}")
 
 
 def create_app():
@@ -47,6 +69,9 @@ def create_app():
                 logger.info(f"  └── Phoenix instrumented: endpoint={settings.PHOENIX_URI}")
             except Exception as e:
                 logger.error(f"  └── Phoenix 초기화 실패: {e}")
+
+        # LLM 커넥션 프리워밍 (비차단, 백그라운드 실행, 참조 보관으로 GC 방지)
+        _warmup_task = asyncio.create_task(warmup_llm())  # noqa: F841
 
         logger.info(f"{settings.APP_NAME}[{settings.APP_PORT}] service is ready and now running!!")
         yield

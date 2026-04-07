@@ -27,10 +27,12 @@ from langgraph.graph import END, StateGraph
 from common.util.llm_gateway_client import LLMGatewayClient
 from core.log.logging import get_logging
 from service.agent.mentor.v1.prompts import (
+    DYNAMIC_PROMPT_TEMPLATE,
     GENERATE_PROMPT,
     GRADE_PROMPT,
     INTENT_PROMPT,
     REWRITE_PROMPT,
+    STATIC_GENERATOR_PROMPT,
     VALIDATE_PROMPT,
 )
 from service.agent.mentor.v1.state import MentoringState
@@ -292,26 +294,19 @@ def build_mentor_graph(
     async def generate(state: MentoringState) -> MentoringState:
         """
         검색 컨텍스트 + 질문으로 멘토링 답변 생성.
-        LLM Gateway가 GENERATE_PROMPT 앞에 PERSONA/GUARDRAIL/RAG/FEWSHOT 자동 삽입.
+        LLM Gateway가 STATIC_GENERATOR_PROMPT 앞에 PERSONA/GUARDRAIL/RAG/FEWSHOT 자동 삽입.
+        messages[0]은 순수 정적 문자열 → Azure OpenAI auto prefix caching 대상.
         """
-        # 동적 프롬프트 주입: 아키타입 이력 및 턴 카운트
+        # 동적 변수 준비
         turn_count = state.get("turn_count", 0)
         previous_archetypes = state.get("previous_archetypes", [])
-
-        # 직전 턴 질문 종결 여부 계산
         prev_answer = state.get("previous_answer", "")
         prev_ends_with_question = "YES" if prev_answer.strip().endswith("?") else "NO"
+        context = state.get("context", "")
+        query = state["original_query"]
 
-        dynamic_prompt = GENERATE_PROMPT.format(
-            turn_count=turn_count,
-            previous_archetypes=previous_archetypes,
-            prev_ends_with_question=prev_ends_with_question,
-            chat_history="",  # chat_history는 메시지로 별도 주입
-            context=state.get("context", ""),
-            query=state["original_query"],
-        )
-
-        messages = [ChatHistory(role="system", content=dynamic_prompt)]
+        # messages[0]: 정적 시스템 프롬프트 (캐시 대상, f-string 없음)
+        messages = [ChatHistory(role="system", content=STATIC_GENERATOR_PROMPT)]
 
         # 이전 대화 이력 (최근 6턴)
         for msg in state["chat_history"][-6:]:
@@ -324,17 +319,38 @@ def build_mentor_graph(
                 content=f"[이전 답변 수정 요청] {state['validate_reason']}",
             ))
 
-        # 참고 자료 + 질문 구성 (LLM Gateway RAG 프롬프트가 이 구조를 처리)
-        context = state.get("context", "")
-        query = state["original_query"]
-        if context:
-            user_content = f"## 참고 자료\n{context}\n\n## 질문\n{query}"
+        # 동적 사용자 메시지: 세션 정보 + 컨텍스트 + 질문
+        dynamic_content = DYNAMIC_PROMPT_TEMPLATE.format(
+            turn_count=turn_count,
+            previous_archetypes=previous_archetypes,
+            prev_ends_with_question=prev_ends_with_question,
+            context=context,
+            query=query,
+        )
+        messages.append(ChatHistory(role="user", content=dynamic_content))
+
+        # generate는 캐시 로깅을 위해 직접 client 호출
+        result = await client.call_completions_non_stream(
+            user_id=user_id, org_id=org_id,
+            provider=provider, model=model,
+            messages=messages, prompt_variables=None,
+            agent_name=agent_name,
+        )
+        if "choices" in result:
+            answer = result["choices"][0].get("message", {}).get("content", "")
         else:
-            user_content = f"## 질문\n{query}"
+            answer = result.get("content", "")
 
-        messages.append(ChatHistory(role="user", content=user_content))
-
-        answer = await _call_llm(messages)
+        # 캐시 히트 로깅 (Azure OpenAI auto prefix caching)
+        try:
+            usage = result.get("usage", {})
+            cached = (
+                usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                if isinstance(usage, dict) else 0
+            )
+            logger.info(f"[generate] cached_tokens={cached}, total_input={usage.get('prompt_tokens', 'N/A')}")
+        except Exception:
+            pass
 
         # 아키타입 태그 파싱 및 제거
         archetype_match = re.search(r'<!--archetype:(\w+)-->', answer)
@@ -364,6 +380,13 @@ def build_mentor_graph(
 
     async def validate(state: MentoringState) -> MentoringState:
         """생성된 답변이 SKMS 철학 및 사실 관계에 부합하는지 검증"""
+        # 1순위: followup 경로는 validate 무조건 스킵 (이전 context 재사용이므로 검증 불필요)
+        if state.get("route") == "followup":
+            state["validate_result"] = "pass"
+            state["validate_reason"] = ""
+            logger.info("[validate] followup route → skip validation")
+            return state
+
         # 이미 재생성을 1회 수행했으면 무조건 pass 처리 (무한루프 방지)
         if state.get("validate_count", 0) >= MAX_VALIDATE:
             state["validate_result"] = "pass"
@@ -371,7 +394,7 @@ def build_mentor_graph(
             logger.info("[validate] max_validate reached → force pass")
             return state
 
-        # 인텐트 분류 신뢰도가 높으면 검증 스킵 (LLM 호출 절약)
+        # 2순위: 인텐트 분류 신뢰도가 높으면 검증 스킵 (LLM 호출 절약)
         if state.get("intent_confidence", 0) >= 0.8 and state.get("grade_decision") == "sufficient":
             state["validate_result"] = "pass"
             state["validate_reason"] = ""
@@ -590,24 +613,20 @@ async def run_pre_generate(
 
 
 def build_generate_messages(state: dict) -> list:
-    """generate 노드용 메시지 리스트를 구성 (스트리밍에서 재사용)"""
+    """generate 노드용 메시지 리스트를 구성 (스트리밍에서 재사용).
+    messages[0]은 순수 정적 문자열 → Azure OpenAI auto prefix caching 대상.
+    """
     from service.model.agent import ChatHistory as CH
 
     turn_count = state.get("turn_count", 0)
     previous_archetypes = state.get("previous_archetypes", [])
     prev_answer = state.get("previous_answer", "")
     prev_ends_with_question = "YES" if prev_answer.strip().endswith("?") else "NO"
+    context = state.get("context", "")
+    query = state["original_query"]
 
-    dynamic_prompt = GENERATE_PROMPT.format(
-        turn_count=turn_count,
-        previous_archetypes=previous_archetypes,
-        prev_ends_with_question=prev_ends_with_question,
-        chat_history="",
-        context=state.get("context", ""),
-        query=state["original_query"],
-    )
-
-    messages = [CH(role="system", content=dynamic_prompt)]
+    # messages[0]: 정적 시스템 프롬프트 (캐시 대상, f-string 없음)
+    messages = [CH(role="system", content=STATIC_GENERATOR_PROMPT)]
 
     for msg in state["chat_history"][-6:]:
         messages.append(CH(role=msg["role"], content=msg["content"]))
@@ -618,13 +637,15 @@ def build_generate_messages(state: dict) -> list:
             content=f"[이전 답변 수정 요청] {state['validate_reason']}",
         ))
 
-    context = state.get("context", "")
-    query = state["original_query"]
-    if context:
-        user_content = f"## 참고 자료\n{context}\n\n## 질문\n{query}"
-    else:
-        user_content = f"## 질문\n{query}"
-    messages.append(CH(role="user", content=user_content))
+    # 동적 사용자 메시지: 세션 정보 + 컨텍스트 + 질문
+    dynamic_content = DYNAMIC_PROMPT_TEMPLATE.format(
+        turn_count=turn_count,
+        previous_archetypes=previous_archetypes,
+        prev_ends_with_question=prev_ends_with_question,
+        context=context,
+        query=query,
+    )
+    messages.append(CH(role="user", content=dynamic_content))
 
     return messages
 
