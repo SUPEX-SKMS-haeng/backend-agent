@@ -26,6 +26,7 @@ class AgentRequest(BaseModel):
     provider: str = ""
     model: str = ""
     org_id: str | int | None = None
+    session_id: str | None = None
     metadata: dict | None = None
 
     @model_validator(mode="after")

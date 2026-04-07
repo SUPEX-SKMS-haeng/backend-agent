@@ -63,6 +63,7 @@ class BaseAgent(ABC):
             agent_log_repo.create(
                 db,
                 trace_id=trace_id,
+                session_id=request.session_id,
                 user_id=user.get("user_id"),
                 org_id=request.org_id,
                 agent_name=self.name,

@@ -19,6 +19,7 @@ class AgentChatLog(Base):
 
     id: Mapped[int] = mapped_column(BIGINT, primary_key=True, autoincrement=True)
     trace_id: Mapped[str] = mapped_column(String(64), comment="요청 추적 ID (UUID)")
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="대화 세션 ID (멀티턴 그룹핑)")
     user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, comment="사용자 ID")
     org_id: Mapped[int | None] = mapped_column(BIGINT, nullable=True, comment="조직 ID")
     agent_name: Mapped[str] = mapped_column(String(100), comment="에이전트 이름 (rag, summary 등)")
@@ -36,6 +37,7 @@ class AgentChatLog(Base):
 
     __table_args__ = (
         Index("ix_agent_chat_log_trace_id", "trace_id"),
+        Index("ix_agent_chat_log_session_id", "session_id"),
         Index("ix_agent_chat_log_user_id", "user_id"),
         Index("ix_agent_chat_log_org_id", "org_id"),
     )

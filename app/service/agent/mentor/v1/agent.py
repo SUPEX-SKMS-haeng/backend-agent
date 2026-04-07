@@ -121,11 +121,13 @@ class MentoringAgent(BaseAgent):
         result = await self._run_graph(request, user)
         elapsed_seconds = round(time.time() - start_time, 1)
 
+        log_meta = self._build_log_metadata(result)
+        log_meta["elapsed_seconds"] = elapsed_seconds
         self._save_log(
             db, request, user, response_mode,
             answer=result.get("answer", ""),
             sources=result.get("sources", []),
-            log_metadata=self._build_log_metadata(result),
+            log_metadata=log_meta,
         )
 
         return AgentResponse(
@@ -174,11 +176,13 @@ class MentoringAgent(BaseAgent):
                     "choices": [{"index": 0, "delta": {"content": answer[i:i + chunk_size]}}]
                 })
 
+        log_meta = self._build_log_metadata(result)
+        log_meta["elapsed_seconds"] = elapsed_seconds
         self._save_log(
             db, request, user, response_mode,
             answer=answer,
             sources=sources,
-            log_metadata=self._build_log_metadata(result),
+            log_metadata=log_meta,
         )
 
         yield self._format_sse_done()

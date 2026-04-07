@@ -56,6 +56,7 @@ async def get_history(current_user: CurrentUserDep, db: DatabaseDep, offset: int
             {
                 "id": log.id,
                 "traceId": log.trace_id,
+                "sessionId": log.session_id,
                 "query": log.query,
                 "answer": log.answer,
                 "agentName": log.agent_name,
@@ -69,15 +70,31 @@ async def get_history(current_user: CurrentUserDep, db: DatabaseDep, offset: int
 
 @router.get("/history/{trace_id}")
 async def get_history_detail(trace_id: str, db: DatabaseDep):
-    """채팅 히스토리 단건 조회"""
+    """채팅 히스토리 단건 조회 — session_id가 있으면 세션 전체 턴 반환"""
     log = agent_log_repo.get_by_trace_id(db, trace_id=trace_id)
     if not log:
         return {"success": False, "error": {"message": "not found"}}
+
+    # session_id가 있으면 해당 세션의 모든 턴을 반환
+    turns = []
+    if log.session_id:
+        session_logs = agent_log_repo.get_by_session_id(db, session_id=log.session_id)
+        for s_log in session_logs:
+            elapsed = None
+            if s_log.log_metadata and isinstance(s_log.log_metadata, dict):
+                elapsed = s_log.log_metadata.get("elapsed_seconds")
+            turns.append({
+                "query": s_log.query,
+                "answer": s_log.answer,
+                "elapsedSeconds": elapsed,
+            })
+
     return {
         "success": True,
         "data": {
             "id": log.id,
             "traceId": log.trace_id,
+            "sessionId": log.session_id,
             "query": log.query,
             "answer": log.answer,
             "agentName": log.agent_name,
@@ -85,6 +102,7 @@ async def get_history_detail(trace_id: str, db: DatabaseDep):
             "sources": log.sources,
             "logMetadata": log.log_metadata,
             "createDt": log.create_dt.isoformat() if log.create_dt else None,
+            "turns": turns if turns else None,
         },
     }
 
