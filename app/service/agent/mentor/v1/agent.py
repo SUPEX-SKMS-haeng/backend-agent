@@ -51,11 +51,75 @@ class MentoringAgent(BaseAgent):
         "general":  None,                  # 기본 인덱스
     }
 
+    # 인텐트별 보조 검색 인덱스 — 주 인덱스에 없는 관점 보완
+    # SKMS 원문은 모든 답변의 철학적 근거이므로, 주 인덱스가 sk_skms가 아닌 경우 보조 검색
+    _DIVERSITY_SUPPLEMENTARY_MAP: dict[str, list[str]] = {
+        "strategy": ["sk_skms"],              # 전략 → SKMS 원문 보완
+        "culture":  ["sk_skms"],              # 문화 → SKMS 원문 보완
+        "hr":       ["sk_skms"],              # 인재 → SKMS 원문 보완
+        "crisis":   ["sk_history_archive"],   # 위기 → 사보/역사 사례 보완
+        "supex":    ["sk_history_archive"],   # SUPEX → 사보/역사 사례 보완
+        "general":  ["sk_skms"],              # 일반 → SKMS 원문 보완
+    }
+
+    # 보조 인덱스에서 가져올 최소/최대 문서 수
+    _DIVERSITY_MIN = 1
+    _DIVERSITY_MAX = 2
+
     async def _retrieve(self, query: str, metadata: dict | None = None) -> tuple[str, list[dict]]:
-        """Azure AI Search 문서 검색 — metadata.intent로 인덱스 선택"""
+        """Azure AI Search 문서 검색 — 주 인덱스 + 보조 인덱스 다양성 강제"""
+        import asyncio
+
         intent = (metadata or {}).get("intent", "general")
         index_name = self._INTENT_INDEX_MAP.get(intent)  # None이면 settings 기본값 사용
-        return await hybrid_search_documents(query, index_name=index_name)
+        supplementary_indices = self._DIVERSITY_SUPPLEMENTARY_MAP.get(intent, [])
+
+        # 주 인덱스 + 보조 인덱스 병렬 검색
+        tasks = [hybrid_search_documents(query, index_name=index_name)]
+        for sup_index in supplementary_indices:
+            if sup_index != index_name:  # 주 인덱스와 동일하면 스킵
+                tasks.append(hybrid_search_documents(query, index_name=sup_index, top=self._DIVERSITY_MAX))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 주 검색 결과
+        main_result = results[0]
+        if isinstance(main_result, Exception):
+            logger.warning(f"[_retrieve] 주 인덱스 검색 실패: {main_result}")
+            main_context, main_sources = "", []
+        else:
+            main_context, main_sources = main_result
+
+        # 보조 검색 결과 — 주 결과에 없는 문서만 추가 (다양성 강제)
+        seen_titles = {s.get("title", "") for s in main_sources}
+        supplementary_sources: list[dict] = []
+        supplementary_contexts: list[str] = []
+
+        for i, res in enumerate(results[1:], start=1):
+            if isinstance(res, Exception):
+                logger.warning(f"[_retrieve] 보조 인덱스 검색 실패: {res}")
+                continue
+            sup_ctx, sup_srcs = res
+            for src in sup_srcs:
+                title = src.get("title", "")
+                if title not in seen_titles and len(supplementary_sources) < self._DIVERSITY_MAX:
+                    seen_titles.add(title)
+                    supplementary_sources.append(src)
+            if sup_ctx:
+                supplementary_contexts.append(sup_ctx)
+
+        if supplementary_sources:
+            logger.info(
+                f"[_retrieve:diversity] intent={intent} "
+                f"main={len(main_sources)} supplementary={len(supplementary_sources)}"
+            )
+
+        # 컨텍스트 병합: 주 + 보조
+        all_contexts = [main_context] + supplementary_contexts if supplementary_contexts else [main_context]
+        merged_context = "\n\n---\n\n".join(c for c in all_contexts if c)
+        merged_sources = main_sources + supplementary_sources
+
+        return merged_context, merged_sources
 
     def _build_log_metadata(self, graph_result: dict) -> dict:
         """로그에 저장할 메타데이터 구성"""
