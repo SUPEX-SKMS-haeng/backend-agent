@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 
 from api.deps import CurrentUserDep, DatabaseDep
+from common.util.hybrid_search_client import hybrid_search_documents
 from common.util.search_client import list_indexes, search_documents
 from core.config import get_setting
 from fastapi import APIRouter, Query
@@ -116,8 +117,22 @@ async def get_indexes():
 
 @router.get("/search")
 async def search(query: str = Query(..., description="검색 쿼리"), top: int = Query(5, description="결과 수")):
-    """Azure AI Search 검색 테스트"""
+    """Azure AI Search 검색 테스트 (기존 키워드 검색)"""
     context, sources = await search_documents(query, top=top)
+    return {
+        "success": True,
+        "data": {
+            "context": context,
+            "sources": sources,
+            "count": len(sources),
+        },
+    }
+
+
+@router.get("/search/hybrid")
+async def hybrid_search(query: str = Query(..., description="검색 쿼리"), top: int = Query(5, description="결과 수")):
+    """하이브리드 검색 테스트 (BM25 + Vector + Weighted RRF)"""
+    context, sources = await hybrid_search_documents(query, top=top)
     return {
         "success": True,
         "data": {

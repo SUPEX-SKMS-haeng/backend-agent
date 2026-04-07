@@ -14,7 +14,7 @@ import time
 from typing import AsyncGenerator
 
 from common.util.llm_gateway_client import LLMGatewayClient
-from common.util.search_client import search_documents
+from common.util.hybrid_search_client import hybrid_search_documents
 from core.config import get_setting
 from core.log.logging import get_logging
 from service.agent.base import BaseAgent
@@ -55,7 +55,7 @@ class MentoringAgent(BaseAgent):
         """Azure AI Search 문서 검색 — metadata.intent로 인덱스 선택"""
         intent = (metadata or {}).get("intent", "general")
         index_name = self._INTENT_INDEX_MAP.get(intent)  # None이면 settings 기본값 사용
-        return await search_documents(query, index_name=index_name)
+        return await hybrid_search_documents(query, index_name=index_name)
 
     def _build_log_metadata(self, graph_result: dict) -> dict:
         """로그에 저장할 메타데이터 구성"""

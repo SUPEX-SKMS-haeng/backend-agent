@@ -3,7 +3,7 @@
 from typing import AsyncGenerator
 
 from common.util.llm_gateway_client import LLMGatewayClient
-from common.util.search_client import search_documents
+from common.util.hybrid_search_client import hybrid_search_documents
 from core.config import get_setting
 from core.log.logging import get_logging
 from service.agent.base import BaseAgent
@@ -25,7 +25,7 @@ class RagAgentV1(BaseAgent):
 
     async def _retrieve(self, query: str, metadata: dict | None = None) -> tuple[str, list[dict]]:
         """Azure AI Search로 문서 검색"""
-        return await search_documents(query)
+        return await hybrid_search_documents(query)
 
     def _build_log_metadata(self, sources: list[dict]) -> dict:
         """로그에 저장할 메타데이터 구성"""
