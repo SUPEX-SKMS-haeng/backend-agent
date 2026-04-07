@@ -542,8 +542,9 @@ async def run_pre_generate(
         is_q = last_assistant.rstrip().endswith("?") or last_assistant.rstrip().endswith("까?")
         state["route"] = "followup" if is_q and len(query.strip()) < 80 else "new_query"
 
-    if state["route"] == "followup":
-        return state  # generate로 바로 이동
+    # followup이어도 RAG 검색은 수행 — sources 제공을 위해 검색 파이프라인 계속 실행
+    # if state["route"] == "followup":
+    #     return state
 
     # 2. intent_classify (키워드 기반)
     _INTENT_KEYWORDS = {

@@ -84,11 +84,13 @@ async def get_history_detail(trace_id: str, db: DatabaseDep):
             elapsed = None
             if s_log.log_metadata and isinstance(s_log.log_metadata, dict):
                 elapsed = s_log.log_metadata.get("elapsed_seconds")
+            raw_sources = s_log.sources
+            source_items = raw_sources.get("items") if isinstance(raw_sources, dict) else raw_sources
             turns.append({
                 "query": s_log.query,
                 "answer": s_log.answer,
                 "elapsedSeconds": elapsed,
-                "sources": s_log.sources,
+                "sources": source_items,
             })
 
     return {
@@ -101,7 +103,7 @@ async def get_history_detail(trace_id: str, db: DatabaseDep):
             "answer": log.answer,
             "agentName": log.agent_name,
             "agentVersion": log.agent_version,
-            "sources": log.sources,
+            "sources": log.sources.get("items") if isinstance(log.sources, dict) else log.sources,
             "logMetadata": log.log_metadata,
             "createDt": log.create_dt.isoformat() if log.create_dt else None,
             "turns": turns if turns else None,
