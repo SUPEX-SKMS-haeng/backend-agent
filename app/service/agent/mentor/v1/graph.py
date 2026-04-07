@@ -17,6 +17,7 @@ SK 멘토링 에이전트 — LangGraph 워크플로우
                       (한도 초과 시 → generate fallback)
 """
 
+import asyncio
 import json
 import random
 import re
@@ -162,13 +163,18 @@ def build_mentor_graph(
     # ── 노드 3: 문서 검색 ────────────────────────────────────
 
     async def retrieve(state: MentoringState) -> MentoringState:
-        """확장된 쿼리로 순차 검색 후 컨텍스트/출처 누산"""
+        """확장된 쿼리로 병렬 검색 후 컨텍스트/출처 누산"""
         all_context_parts: list[str] = []
         all_sources: list[dict] = []
         seen_titles: set[str] = set()
 
-        for query in state["search_queries"]:
-            ctx, srcs = await retrieve_fn(query, {"intent": state["intent"]})
+        # 모든 쿼리를 병렬로 실행
+        results = await asyncio.gather(
+            *(retrieve_fn(query, {"intent": state["intent"]})
+              for query in state["search_queries"])
+        )
+
+        for ctx, srcs in results:
             if ctx:
                 all_context_parts.append(ctx)
             for src in srcs:
@@ -185,20 +191,19 @@ def build_mentor_graph(
     # ── 노드 4: 검색 결과 평가 ───────────────────────────────
 
     async def grade(state: MentoringState) -> MentoringState:
-        """검색 컨텍스트가 질문에 답하기 충분한지 LLM으로 판단"""
-        prompt = GRADE_PROMPT.format(
-            query=state["query"],
-            context=state["context"][:2000],  # 평가용 2000자 제한
-        )
-        messages = [ChatHistory(role="user", content=prompt)]
+        """검색 컨텍스트가 질문에 답하기 충분한지 규칙 기반으로 판단 (LLM 호출 제거)"""
+        context = state.get("context", "")
+        sources = state.get("sources", [])
 
-        decision = await _call_llm(messages)
-        decision = decision.strip().lower()
+        # 규칙 기반 판단: 소스가 있고 컨텍스트가 최소 길이 이상이면 sufficient
+        if len(sources) >= 1 and len(context) >= 100:
+            state["grade_decision"] = "sufficient"
+        else:
+            state["grade_decision"] = "insufficient"
 
-        state["grade_decision"] = "sufficient" if "sufficient" in decision else "insufficient"
         logger.info(
             f"[grade] → {state['grade_decision']} "
-            f"(retry={state['retry_count']}, sources={len(state['sources'])})"
+            f"(retry={state['retry_count']}, sources={len(sources)}, ctx_len={len(context)})"
         )
         return state
 
@@ -338,6 +343,13 @@ def build_mentor_graph(
             state["validate_result"] = "pass"
             state["validate_reason"] = ""
             logger.info("[validate] max_validate reached → force pass")
+            return state
+
+        # 인텐트 분류 신뢰도가 높으면 검증 스킵 (LLM 호출 절약)
+        if state.get("intent_confidence", 0) >= 0.8 and state.get("grade_decision") == "sufficient":
+            state["validate_result"] = "pass"
+            state["validate_reason"] = ""
+            logger.info(f"[validate] high confidence ({state['intent_confidence']:.2f}) → skip validation")
             return state
 
         prompt = VALIDATE_PROMPT.format(
