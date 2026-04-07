@@ -354,7 +354,7 @@ class HybridSearchClient:
                 logger.debug(f"[hybrid_search] RRF rank {i+1} 문서에 content 없음, skip: title={title}")
                 continue
 
-            context_parts.append(f"[자료 {i + 1}: {title}]\n{content}")
+            context_parts.append(f"[{title}]\n{content}")
             sources.append({
                 "index": i + 1,
                 "title": title,

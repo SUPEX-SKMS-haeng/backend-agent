@@ -252,19 +252,49 @@ def build_mentor_graph(
     # ── 노드 4: 검색 결과 평가 ───────────────────────────────
 
     async def grade(state: MentoringState) -> MentoringState:
-        """검색 컨텍스트가 질문에 답하기 충분한지 규칙 기반으로 판단 (LLM 호출 제거)"""
+        """검색 컨텍스트가 질문에 답하기 충분한지 관련성 기반으로 판단"""
         context = state.get("context", "")
         sources = state.get("sources", [])
+        query = state.get("original_query", state.get("query", ""))
 
-        # 규칙 기반 판단: 소스가 있고 컨텍스트가 최소 길이 이상이면 sufficient
-        if len(sources) >= 1 and len(context) >= 100:
+        # 1단계: 기본 필터 (소스 없거나 너무 짧으면 바로 insufficient)
+        if len(sources) < 1 or len(context) < 100:
+            state["grade_decision"] = "insufficient"
+            logger.info(
+                f"[grade] → insufficient (basic filter) "
+                f"(retry={state['retry_count']}, sources={len(sources)}, ctx_len={len(context)})"
+            )
+            return state
+
+        # 2단계: 질문-컨텍스트 키워드 관련성 평가
+        # 질문에서 핵심 키워드 추출 (조사/어미 제거용 불용어 제외)
+        _STOPWORDS = {
+            "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
+            "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
+            "회장님", "선대회장님", "하고", "되고", "잡으", "내라고",
+        }
+        query_tokens = set(query.replace("?", "").replace(".", "").split())
+        query_keywords = {t for t in query_tokens if len(t) >= 2 and t not in _STOPWORDS}
+
+        # 컨텍스트에 질문 키워드가 얼마나 포함되어 있는지 계산
+        context_lower = context.lower()
+        matched = sum(1 for kw in query_keywords if kw.lower() in context_lower)
+        relevance = matched / max(len(query_keywords), 1)
+
+        # 최소 관련성 30% 이상이고 소스 2개 이상이어야 sufficient
+        if relevance >= 0.3 and len(sources) >= 2:
+            state["grade_decision"] = "sufficient"
+        elif relevance >= 0.5:
+            # 관련성이 높으면 소스 1개라도 허용
             state["grade_decision"] = "sufficient"
         else:
             state["grade_decision"] = "insufficient"
 
         logger.info(
             f"[grade] → {state['grade_decision']} "
-            f"(retry={state['retry_count']}, sources={len(sources)}, ctx_len={len(context)})"
+            f"(retry={state['retry_count']}, sources={len(sources)}, "
+            f"ctx_len={len(context)}, relevance={relevance:.2f}, "
+            f"query_kw={len(query_keywords)}, matched={matched})"
         )
         return state
 
@@ -401,12 +431,8 @@ def build_mentor_graph(
             logger.info("[validate] max_validate reached → force pass")
             return state
 
-        # 2순위: 인텐트 분류 신뢰도가 높으면 검증 스킵 (LLM 호출 절약)
-        if state.get("intent_confidence", 0) >= 0.8 and state.get("grade_decision") == "sufficient":
-            state["validate_result"] = "pass"
-            state["validate_reason"] = ""
-            logger.info(f"[validate] high confidence ({state['intent_confidence']:.2f}) → skip validation")
-            return state
+        # 2순위: 인텐트 분류 신뢰도가 높아도 사실 근거 검증은 항상 수행
+        # (할루시네이션은 인텐트 신뢰도와 무관하게 발생하므로 스킵하지 않음)
 
         prompt = VALIDATE_PROMPT.format(
             context=state.get("context", "")[:1000],
@@ -605,12 +631,30 @@ async def run_pre_generate(
         state["sources"] = all_sources
         logger.debug(f"[run_pre_generate] retrieve attempt={attempt} sources={len(all_sources)} ctx_len={len(state['context'])}")
 
-        # 5. grade (규칙 기반)
-        if len(all_sources) >= 1 and len(state["context"]) >= 100:
+        # 5. grade (관련성 기반)
+        _STOPWORDS_PRE = {
+            "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
+            "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
+            "회장님", "선대회장님", "하고", "되고", "잡으", "내라고",
+        }
+        q_tokens = set(query.replace("?", "").replace(".", "").split())
+        q_kws = {t for t in q_tokens if len(t) >= 2 and t not in _STOPWORDS_PRE}
+        ctx_lower = state["context"].lower()
+        matched_kw = sum(1 for kw in q_kws if kw.lower() in ctx_lower)
+        rel = matched_kw / max(len(q_kws), 1)
+
+        is_sufficient = (
+            len(all_sources) >= 1
+            and len(state["context"]) >= 100
+            and (rel >= 0.3 and len(all_sources) >= 2 or rel >= 0.5)
+        )
+        if is_sufficient:
             state["grade_decision"] = "sufficient"
+            logger.info(f"[run_pre_generate:grade] sufficient (relevance={rel:.2f}, sources={len(all_sources)})")
             break
         if attempt >= MAX_RETRIES:
             state["grade_decision"] = "insufficient"
+            logger.info(f"[run_pre_generate:grade] insufficient after max retries (relevance={rel:.2f})")
             break
 
         # rewrite
