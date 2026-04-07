@@ -550,9 +550,14 @@ async def run_pre_generate(
         is_q = last_assistant.rstrip().endswith("?") or last_assistant.rstrip().endswith("까?")
         state["route"] = "followup" if is_q and len(query.strip()) < 80 else "new_query"
 
-    # followup이어도 RAG 검색은 수행 — sources 제공을 위해 검색 파이프라인 계속 실행
-    # if state["route"] == "followup":
-    #     return state
+    if state["route"] == "followup":
+        # followup: 인텐트/쿼리확장 생략, RAG 검색만 1회 수행하여 sources 확보
+        ctx, srcs = await retrieve_fn(query, {"intent": state.get("intent", "general")})
+        state["context"] = ctx or ""
+        state["sources"] = srcs or []
+        state["grade_decision"] = "sufficient" if srcs else "insufficient"
+        logger.info(f"[run_pre_generate:followup] sources={len(srcs)} ctx_len={len(state['context'])}")
+        return state
 
     # 2. intent_classify (키워드 기반)
     _INTENT_KEYWORDS = {
