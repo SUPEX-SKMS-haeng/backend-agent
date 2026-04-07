@@ -41,6 +41,37 @@ logger = get_logging()
 MAX_RETRIES = 2    # 재검색 최대 횟수
 MAX_VALIDATE = 1   # 검증 실패 후 재생성 최대 횟수
 
+
+def reinforce_ije(text: str) -> str:
+    """'이제' 접속어가 부족하면 자연스러운 위치에 삽입"""
+    sentences = text.split('. ')
+    ije_count = text.count('이제')
+    target_count = max(1, len(sentences) // 4)  # 4문장당 최소 1회
+
+    if ije_count >= target_count:
+        return text
+
+    ije_variants = ['이제 ', '이제, ', '이제 말이야, ']
+    transition_words = ['그래서', '그런데', '또', '그리고']
+
+    inserted = 0
+    for i in range(3, len(sentences), 4):
+        if inserted >= (target_count - ije_count):
+            break
+        sentence = sentences[i].lstrip()
+        has_transition = any(sentence.startswith(tw) for tw in transition_words)
+        if has_transition:
+            for tw in transition_words:
+                if sentence.startswith(tw):
+                    sentences[i] = sentence.replace(tw, random.choice(ije_variants), 1)
+                    inserted += 1
+                    break
+        elif not sentence.startswith('이제'):
+            sentences[i] = random.choice(ije_variants) + sentence
+            inserted += 1
+
+    return '. '.join(sentences)
+
 # ── 인텐트별 검색 쿼리 접두어 (규칙 기반, LLM 비용 없음) ─────
 _INTENT_SEARCH_PREFIX: dict[str, list[str]] = {
     "strategy": ["전략", "사업 방향"],
@@ -121,28 +152,55 @@ def build_mentor_graph(
 
     # ── 노드 1: 인텐트 분류 ─────────────────────────────────
 
+    # ── 키워드 기반 인텐트 분류 (LLM 호출 제거) ──────────────
+    _INTENT_KEYWORDS: dict[str, list[str]] = {
+        "strategy": [
+            "전략", "사업 포트폴리오", "신사업", "M&A", "글로벌", "중장기",
+            "사업 방향", "투자", "포트폴리오", "성장 동력", "비전",
+        ],
+        "culture": [
+            "조직문화", "VWBE", "구성원 행복", "팀워크", "구성원 육성",
+            "사기", "분위기", "소통", "협업", "행복",
+        ],
+        "crisis": [
+            "위기", "리스크", "재무 위기", "대외 이슈", "위기관리",
+            "리스크 대응", "위험", "불확실",
+        ],
+        "supex": [
+            "SUPEX", "수펙스", "패기", "도전 목표", "실행 방법론",
+            "목표 설정", "도전", "초일류",
+        ],
+        "hr": [
+            "인재", "채용", "평가", "보상", "승진", "리더십 개발",
+            "인사", "교육", "역량", "성과 관리",
+        ],
+    }
+
     async def intent_classify(state: MentoringState) -> MentoringState:
-        """LLM으로 질문 유형 분류 → intent, intent_confidence"""
-        prompt = INTENT_PROMPT.format(query=state["query"])
-        messages = [ChatHistory(role="user", content=prompt)]
+        """키워드 매칭으로 질문 유형 분류 (LLM 미사용, 즉시 반환)"""
+        query = state["query"].lower()
 
-        raw = await _call_llm(messages)
-        try:
-            result = json.loads(raw)
-            intent = result.get("intent", "general")
-            confidence = float(result.get("confidence", 0.5))
-        except (json.JSONDecodeError, ValueError):
-            # 파싱 실패 시 general로 폴백
-            intent = "general"
-            confidence = 0.5
+        best_intent = "general"
+        best_score = 0
 
-        # 유효하지 않은 카테고리 방어
-        if intent not in _INTENT_SEARCH_PREFIX:
-            intent = "general"
+        for intent, keywords in _INTENT_KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw.lower() in query)
+            if score > best_score:
+                best_score = score
+                best_intent = intent
 
-        state["intent"] = intent
+        # "패기" 컨텍스트 분기: 도전/목표 맥락이면 supex, 사기/분위기면 culture
+        if "패기" in query:
+            if any(w in query for w in ["도전", "목표", "SUPEX", "수펙스", "실행"]):
+                best_intent = "supex"
+            elif any(w in query for w in ["사기", "분위기", "문화", "조직"]):
+                best_intent = "culture"
+
+        confidence = min(1.0, best_score * 0.3 + 0.4) if best_score > 0 else 0.3
+
+        state["intent"] = best_intent
         state["intent_confidence"] = confidence
-        logger.info(f"[intent_classify] intent={intent} confidence={confidence:.2f}")
+        logger.info(f"[intent_classify] intent={best_intent} confidence={confidence:.2f} (keyword-based)")
         return state
 
     # ── 노드 2: 쿼리 확장 (규칙 기반, LLM 미사용) ──────────
@@ -231,38 +289,6 @@ def build_mentor_graph(
 
     # ── 노드 6: 최종 답변 생성 (PERSONA 주입 대상) ──────────
 
-    def _reinforce_ije(text: str) -> str:
-        """'이제' 접속어가 부족하면 자연스러운 위치에 삽입"""
-        sentences = text.split('. ')
-        ije_count = text.count('이제')
-        target_count = max(1, len(sentences) // 4)  # 4문장당 최소 1회
-
-        if ije_count >= target_count:
-            return text
-
-        # 삽입 가능한 접속어 패턴
-        ije_variants = ['이제 ', '이제, ', '이제 말이야, ']
-        transition_words = ['그래서', '그런데', '또', '그리고']
-
-        inserted = 0
-        for i in range(3, len(sentences), 4):  # 3번째 문장부터 4문장 간격
-            if inserted >= (target_count - ije_count):
-                break
-            sentence = sentences[i].lstrip()
-            # 이미 접속어로 시작하면 교체, 아니면 앞에 추가
-            has_transition = any(sentence.startswith(tw) for tw in transition_words)
-            if has_transition:
-                for tw in transition_words:
-                    if sentence.startswith(tw):
-                        sentences[i] = sentence.replace(tw, random.choice(ije_variants), 1)
-                        inserted += 1
-                        break
-            elif not sentence.startswith('이제'):
-                sentences[i] = random.choice(ije_variants) + sentence
-                inserted += 1
-
-        return '. '.join(sentences)
-
     async def generate(state: MentoringState) -> MentoringState:
         """
         검색 컨텍스트 + 질문으로 멘토링 답변 생성.
@@ -316,7 +342,7 @@ def build_mentor_graph(
         clean_answer = re.sub(r'<!--archetype:\w+-->', '', answer).strip()
 
         # "이제" 접속어 후처리 보강
-        clean_answer = _reinforce_ije(clean_answer)
+        clean_answer = reinforce_ije(clean_answer)
 
         # state 업데이트
         state["answer"] = clean_answer
@@ -431,3 +457,181 @@ def build_mentor_graph(
     })
 
     return graph.compile()
+
+
+def build_pre_generate_graph(
+    client: LLMGatewayClient,
+    user_id: str,
+    org_id: str | None,
+    provider: str,
+    model: str,
+    retrieve_fn,
+    agent_name: str = "mentor-v1",
+) -> StateGraph:
+    """
+    generate/validate를 제외한 검색 파이프라인 그래프.
+    스트리밍 모드에서 검색까지만 실행 후, generate를 실제 스트리밍으로 처리하기 위해 사용.
+    """
+    # build_mentor_graph와 동일한 노드를 재생성 (클로저 필요)
+    full_graph_compiled = build_mentor_graph(
+        client=client, user_id=user_id, org_id=org_id,
+        provider=provider, model=model,
+        retrieve_fn=retrieve_fn, agent_name=agent_name,
+    )
+    # 대신 간단히 파이프라인 함수로 구현
+    return full_graph_compiled  # 아래 run_pre_generate에서 직접 처리
+
+
+async def run_pre_generate(
+    client: LLMGatewayClient,
+    user_id: str,
+    org_id: str | None,
+    provider: str,
+    model: str,
+    retrieve_fn,
+    agent_name: str,
+    initial_state: dict,
+) -> dict:
+    """generate 직전까지의 파이프라인을 실행하고 state를 반환."""
+    from service.agent.mentor.v1.state import MentoringState as MS
+
+    state = dict(initial_state)
+
+    async def _call_llm(messages):
+        result = await client.call_completions_non_stream(
+            user_id=user_id, org_id=org_id,
+            provider=provider, model=model,
+            messages=messages, prompt_variables=None,
+            agent_name=agent_name,
+        )
+        if "choices" in result:
+            return result["choices"][0].get("message", {}).get("content", "")
+        return result.get("content", "")
+
+    # 1. conversation_router
+    history = state.get("chat_history", [])
+    query = state["query"]
+    if not history:
+        state["route"] = "new_query"
+    else:
+        last_assistant = next(
+            (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
+        )
+        is_q = last_assistant.rstrip().endswith("?") or last_assistant.rstrip().endswith("까?")
+        state["route"] = "followup" if is_q and len(query.strip()) < 80 else "new_query"
+
+    if state["route"] == "followup":
+        return state  # generate로 바로 이동
+
+    # 2. intent_classify (키워드 기반)
+    _INTENT_KEYWORDS = {
+        "strategy": ["전략", "사업 포트폴리오", "신사업", "M&A", "글로벌", "중장기", "사업 방향", "투자", "포트폴리오", "성장 동력", "비전"],
+        "culture": ["조직문화", "VWBE", "구성원 행복", "팀워크", "구성원 육성", "사기", "분위기", "소통", "협업", "행복"],
+        "crisis": ["위기", "리스크", "재무 위기", "대외 이슈", "위기관리", "리스크 대응", "위험", "불확실"],
+        "supex": ["SUPEX", "수펙스", "패기", "도전 목표", "실행 방법론", "목표 설정", "도전", "초일류"],
+        "hr": ["인재", "채용", "평가", "보상", "승진", "리더십 개발", "인사", "교육", "역량", "성과 관리"],
+    }
+    q_lower = query.lower()
+    best_intent, best_score = "general", 0
+    for intent, keywords in _INTENT_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw.lower() in q_lower)
+        if score > best_score:
+            best_score = score
+            best_intent = intent
+    if "패기" in query:
+        if any(w in query for w in ["도전", "목표", "SUPEX", "수펙스", "실행"]):
+            best_intent = "supex"
+        elif any(w in query for w in ["사기", "분위기", "문화", "조직"]):
+            best_intent = "culture"
+    state["intent"] = best_intent
+    state["intent_confidence"] = min(1.0, best_score * 0.3 + 0.4) if best_score > 0 else 0.3
+
+    # 3. query_expand
+    q = state.get("rewritten_query") or state["original_query"]
+    prefixes = _INTENT_SEARCH_PREFIX.get(state["intent"], [])
+    state["search_queries"] = [q] + [f"{p} {q}" for p in prefixes[:2]]
+
+    # 4. retrieve (병렬) + rewrite 루프
+    for attempt in range(MAX_RETRIES + 1):
+        all_context_parts, all_sources, seen_titles = [], [], set()
+        results = await asyncio.gather(
+            *(retrieve_fn(sq, {"intent": state["intent"]}) for sq in state["search_queries"])
+        )
+        for ctx, srcs in results:
+            if ctx:
+                all_context_parts.append(ctx)
+            for src in srcs:
+                title = src.get("title", "")
+                if title not in seen_titles:
+                    seen_titles.add(title)
+                    all_sources.append(src)
+        state["context"] = "\n\n---\n\n".join(all_context_parts)
+        state["sources"] = all_sources
+
+        # 5. grade (규칙 기반)
+        if len(all_sources) >= 1 and len(state["context"]) >= 100:
+            state["grade_decision"] = "sufficient"
+            break
+        if attempt >= MAX_RETRIES:
+            state["grade_decision"] = "insufficient"
+            break
+
+        # rewrite
+        from service.model.agent import ChatHistory as CH
+        rewrite_prompt = REWRITE_PROMPT.format(query=state["query"])
+        rewritten = await _call_llm([CH(role="user", content=rewrite_prompt)])
+        state["rewritten_query"] = rewritten.strip()
+        state["retry_count"] += 1
+        q = state["rewritten_query"]
+        state["search_queries"] = [q] + [f"{p} {q}" for p in prefixes[:2]]
+
+    logger.info(f"[run_pre_generate] intent={state['intent']} sources={len(state['sources'])} retries={state['retry_count']}")
+    return state
+
+
+def build_generate_messages(state: dict) -> list:
+    """generate 노드용 메시지 리스트를 구성 (스트리밍에서 재사용)"""
+    from service.model.agent import ChatHistory as CH
+
+    turn_count = state.get("turn_count", 0)
+    previous_archetypes = state.get("previous_archetypes", [])
+    prev_answer = state.get("previous_answer", "")
+    prev_ends_with_question = "YES" if prev_answer.strip().endswith("?") else "NO"
+
+    dynamic_prompt = GENERATE_PROMPT.format(
+        turn_count=turn_count,
+        previous_archetypes=previous_archetypes,
+        prev_ends_with_question=prev_ends_with_question,
+        chat_history="",
+        context=state.get("context", ""),
+        query=state["original_query"],
+    )
+
+    messages = [CH(role="system", content=dynamic_prompt)]
+
+    for msg in state["chat_history"][-6:]:
+        messages.append(CH(role=msg["role"], content=msg["content"]))
+
+    if state.get("validate_reason"):
+        messages.append(CH(
+            role="system",
+            content=f"[이전 답변 수정 요청] {state['validate_reason']}",
+        ))
+
+    context = state.get("context", "")
+    query = state["original_query"]
+    if context:
+        user_content = f"## 참고 자료\n{context}\n\n## 질문\n{query}"
+    else:
+        user_content = f"## 질문\n{query}"
+    messages.append(CH(role="user", content=user_content))
+
+    return messages
+
+
+def parse_archetype(answer: str) -> tuple[str, str]:
+    """아키타입 태그 파싱 및 제거. (archetype, clean_answer) 반환"""
+    archetype_match = re.search(r'<!--archetype:(\w+)-->', answer)
+    current_archetype = archetype_match.group(1) if archetype_match else "standard"
+    clean_answer = re.sub(r'<!--archetype:\w+-->', '', answer).strip()
+    return current_archetype, clean_answer
