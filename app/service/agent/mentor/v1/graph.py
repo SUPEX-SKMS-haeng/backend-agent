@@ -31,8 +31,10 @@ from service.agent.mentor.v1.prompts import (
     GENERATE_PROMPT,
     GRADE_PROMPT,
     INTENT_PROMPT,
+    INTENT_TALK_TYPE_MAP,
     REWRITE_PROMPT,
     STATIC_GENERATOR_PROMPT,
+    TALK_TYPE_GUIDES,
     VALIDATE_PROMPT,
 )
 from service.agent.mentor.v1.state import MentoringState
@@ -318,11 +320,17 @@ def build_mentor_graph(
                 content=f"[이전 답변 수정 요청] {state['validate_reason']}",
             ))
 
-        # 동적 사용자 메시지: 세션 정보 + 컨텍스트 + 질문
+        # 인텐트 기반 토크타입 가이드 선택
+        intent = state.get("intent", "general")
+        talk_type_key = INTENT_TALK_TYPE_MAP.get(intent, "mindset")
+        talk_type_guide = TALK_TYPE_GUIDES.get(talk_type_key, "")
+
+        # 동적 사용자 메시지: 세션 정보 + 토크타입 가이드 + 컨텍스트 + 질문
         dynamic_content = DYNAMIC_PROMPT_TEMPLATE.format(
             turn_count=turn_count,
             previous_archetypes=previous_archetypes,
             prev_ends_with_question=prev_ends_with_question,
+            talk_type_guide=talk_type_guide,
             context=context,
             query=query,
         )
@@ -639,11 +647,17 @@ def build_generate_messages(state: dict) -> list:
             content=f"[이전 답변 수정 요청] {state['validate_reason']}",
         ))
 
-    # 동적 사용자 메시지: 세션 정보 + 컨텍스트 + 질문
+    # 인텐트 기반 토크타입 가이드 선택
+    intent = state.get("intent", "general")
+    talk_type_key = INTENT_TALK_TYPE_MAP.get(intent, "mindset")
+    talk_type_guide = TALK_TYPE_GUIDES.get(talk_type_key, "")
+
+    # 동적 사용자 메시지: 세션 정보 + 토크타입 가이드 + 컨텍스트 + 질문
     dynamic_content = DYNAMIC_PROMPT_TEMPLATE.format(
         turn_count=turn_count,
         previous_archetypes=previous_archetypes,
         prev_ends_with_question=prev_ends_with_question,
+        talk_type_guide=talk_type_guide,
         context=context,
         query=query,
     )
