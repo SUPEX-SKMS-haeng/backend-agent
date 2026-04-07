@@ -41,7 +41,7 @@ class Settings(BaseSettings):
 
     # Hybrid Search (BM25 + Vector + Weighted RRF)
     # TODO: 데이터 전량 적재 완료 후 Recall@K, MRR 기반으로 튜닝 필요
-    HYBRID_SEARCH_VECTOR_FIELD: str = "contentVector"
+    HYBRID_SEARCH_VECTOR_FIELD: str = "content_vector"
     HYBRID_SEARCH_TOP_N: int = 5
     HYBRID_SEARCH_K_NEAREST: int = 50
     HYBRID_SEARCH_VECTOR_WEIGHT: float = 0.5

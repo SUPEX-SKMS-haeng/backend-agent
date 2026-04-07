@@ -83,7 +83,10 @@ class HybridSearchClient:
         )
 
         # 실패 처리: Vector 실패 → BM25 단독, BM25 실패 → 빈 결과
-        if isinstance(vector_results, Exception):
+        vector_failed = isinstance(vector_results, Exception)
+        bm25_failed = isinstance(bm25_results, Exception)
+
+        if vector_failed:
             if isinstance(vector_results, HttpResponseError):
                 logger.warning(
                     f"[hybrid_search] vector search failed (HTTP {vector_results.status_code}), "
@@ -96,15 +99,23 @@ class HybridSearchClient:
                     f"error_type={type(vector_results).__name__}: {vector_results}"
                 )
             vector_results = []
-        if isinstance(bm25_results, Exception):
+        if bm25_failed:
             logger.error(
                 f"[hybrid_search] BM25 search failed, index={index}, "
                 f"error_type={type(bm25_results).__name__}: {bm25_results}"
             )
             bm25_results = []
 
+        # 한쪽 검색만 성공 시 해당 가중치를 1.0으로 보정
+        kw_override = 1.0 if vector_failed and not bm25_failed else None
+        vec_override = 1.0 if bm25_failed and not vector_failed else None
+
         # Weighted RRF 병합
-        merged = self._rrf_merge(bm25_results, vector_results, top_n)
+        merged = self._rrf_merge(
+            bm25_results, vector_results, top_n,
+            kw_weight_override=kw_override,
+            vec_weight_override=vec_override,
+        )
 
         total_ms = round((time.monotonic() - total_start) * 1000, 1)
         logger.info(
@@ -184,6 +195,13 @@ class HybridSearchClient:
             "title": title,
             "score": doc.get("@search.score", 0),
             "reranker_score": doc.get("@search.reranker_score"),
+            "document_path": doc.get("document_path", ""),
+            "page_number": doc.get("page_number"),
+            "content_type": doc.get("content_type", ""),
+            "context": doc.get("context", ""),
+            "tags_topic": doc.get("tags_topic", ""),
+            "author": doc.get("author", ""),
+            "issue": doc.get("issue", ""),
         }
 
     # ── Weighted RRF 병합 ────────────────────────────────────
@@ -193,6 +211,9 @@ class HybridSearchClient:
         bm25_results: list[dict],
         vector_results: list[dict],
         top_n: int,
+        *,
+        kw_weight_override: float | None = None,
+        vec_weight_override: float | None = None,
     ) -> list[dict]:
         """
         Weighted RRF(Reciprocal Rank Fusion).
@@ -200,10 +221,11 @@ class HybridSearchClient:
         score = keyword_weight × 1/(k + rank_bm25) + vector_weight × 1/(k + rank_vector)
 
         k=60 고정값 (Azure AI Search 내부 RRF와 동일).
+        한쪽 검색 실패 시 *_weight_override로 나머지 가중치를 1.0으로 보정.
         """
         k = self._rrf_k
-        kw_w = self._keyword_weight
-        vec_w = self._vector_weight
+        kw_w = kw_weight_override if kw_weight_override is not None else self._keyword_weight
+        vec_w = vec_weight_override if vec_weight_override is not None else self._vector_weight
 
         score_map: dict[str, dict] = {}
 
@@ -227,7 +249,19 @@ class HybridSearchClient:
         sorted_results = sorted(
             score_map.values(), key=lambda x: x["rrf_score"], reverse=True,
         )
-        return sorted_results[:top_n]
+        top_results = sorted_results[:top_n]
+
+        # RRF 점수 정규화: 최고 점수를 1.0으로 스케일링
+        if top_results:
+            max_score = top_results[0]["rrf_score"]
+            if max_score > 0:
+                for item in top_results:
+                    item["normalized_score"] = round(item["rrf_score"] / max_score, 4)
+            else:
+                for item in top_results:
+                    item["normalized_score"] = 0.0
+
+        return top_results
 
     @staticmethod
     def _doc_key(doc: dict) -> str:
@@ -273,18 +307,20 @@ class HybridSearchClient:
             sources.append({
                 "index": i + 1,
                 "title": title,
-                "score": round(item["rrf_score"], 6),
+                "score": item.get("normalized_score", round(item["rrf_score"], 6)),
+                "rrf_score_raw": round(item["rrf_score"], 6),
                 "bm25_score": item["bm25_score"],
                 "bm25_rank": item["bm25_rank"],
                 "vector_score": item["vector_score"],
                 "vector_rank": item["vector_rank"],
                 "reranker_score": item["reranker_score"],
-                # TODO: Semantic Ranker(cross-encoder reranker) 도입 시
-                #       reranker_score를 최종 정렬 기준으로 활용.
-                #       Azure AI Search의 semanticConfiguration 설정 후
-                #       search() 호출에 query_type="semantic" 추가하면 자동 반환됨.
                 "content": content,
                 "content_preview": content[:200],
+                "document_path": doc.get("document_path", ""),
+                "page_number": doc.get("page_number"),
+                "tags_topic": doc.get("tags_topic", ""),
+                "author": doc.get("author", ""),
+                "issue": doc.get("issue", ""),
             })
 
         context = "\n\n---\n\n".join(context_parts)

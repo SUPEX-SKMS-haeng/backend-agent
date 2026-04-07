@@ -88,6 +88,7 @@ async def get_history_detail(trace_id: str, db: DatabaseDep):
                 "query": s_log.query,
                 "answer": s_log.answer,
                 "elapsedSeconds": elapsed,
+                "sources": s_log.sources,
             })
 
     return {
