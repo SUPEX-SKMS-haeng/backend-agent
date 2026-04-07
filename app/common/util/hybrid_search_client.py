@@ -249,6 +249,20 @@ class HybridSearchClient:
         sorted_results = sorted(
             score_map.values(), key=lambda x: x["rrf_score"], reverse=True,
         )
+
+        # ── 품질 게이트 ──────────────────────────────────────
+        # 1) 상대적 품질 필터: 최고 점수의 30% 미만인 문서 제거
+        if sorted_results:
+            best_score = sorted_results[0]["rrf_score"]
+            quality_threshold = best_score * 0.3
+            sorted_results = [
+                r for r in sorted_results
+                if r["rrf_score"] >= quality_threshold
+            ]
+
+        # 2) 콘텐츠 중복 제거: 70% 이상 텍스트 오버랩인 문서 제거
+        sorted_results = self._deduplicate_content(sorted_results)
+
         top_results = sorted_results[:top_n]
 
         # RRF 점수 정규화: 최고 점수를 1.0으로 스케일링
@@ -262,6 +276,43 @@ class HybridSearchClient:
                     item["normalized_score"] = 0.0
 
         return top_results
+
+    @staticmethod
+    def _deduplicate_content(results: list[dict], overlap_threshold: float = 0.7) -> list[dict]:
+        """콘텐츠 기반 중복 제거 — 상위 문서 우선 유지, 70% 이상 오버랩 시 하위 문서 제거."""
+        if not results:
+            return results
+
+        kept: list[dict] = []
+        for candidate in results:
+            candidate_content = candidate["doc"].get("content", "")
+            if not candidate_content:
+                kept.append(candidate)
+                continue
+
+            # 이미 선택된 문서들과 오버랩 체크 (단어 집합 기반)
+            candidate_words = set(candidate_content.split())
+            is_duplicate = False
+            for existing in kept:
+                existing_content = existing["doc"].get("content", "")
+                if not existing_content:
+                    continue
+                existing_words = set(existing_content.split())
+                if not candidate_words or not existing_words:
+                    continue
+                overlap = len(candidate_words & existing_words) / min(len(candidate_words), len(existing_words))
+                if overlap >= overlap_threshold:
+                    is_duplicate = True
+                    logger.debug(
+                        f"[quality_gate] 중복 제거: overlap={overlap:.0%} "
+                        f"title='{candidate['doc'].get('title', '')[:30]}'"
+                    )
+                    break
+
+            if not is_duplicate:
+                kept.append(candidate)
+
+        return kept
 
     @staticmethod
     def _doc_key(doc: dict) -> str:
