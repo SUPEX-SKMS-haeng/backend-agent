@@ -125,7 +125,7 @@ class HybridSearchClient:
         )
         try:
             results = []
-            async for doc in client.search(
+            async for doc in await client.search(
                 search_text=query,
                 top=self._k_nearest,
                 query_type="simple",
@@ -159,7 +159,7 @@ class HybridSearchClient:
         )
         try:
             results = []
-            async for doc in client.search(
+            async for doc in await client.search(
                 search_text=None,
                 vector_queries=[vector_query],
                 top=self._k_nearest,

@@ -16,9 +16,13 @@ logger = get_logging()
 
 
 async def warmup_llm() -> None:
-    """앱 시작 시 Azure OpenAI TCP 연결을 미리 수립합니다."""
+    """앱 시작 시 Azure OpenAI TCP 연결 + 프롬프트 캐시 프리워밍.
+    실제 generate와 동일한 messages[0](STATIC_GENERATOR_PROMPT)을 사용하여
+    Azure OpenAI auto prefix caching을 사전 적재합니다.
+    """
     try:
         from common.util.llm_gateway_client import LLMGatewayClient
+        from service.agent.mentor.v1.prompts import STATIC_GENERATOR_PROMPT
         from service.model.agent import ChatHistory
 
         client = LLMGatewayClient(llm_gateway_url=settings.LLM_GATEWAY_URL)
@@ -26,12 +30,15 @@ async def warmup_llm() -> None:
             user_id="system",
             org_id=None,
             provider="azure-openai",
-            model="gpt-4o",
-            messages=[ChatHistory(role="user", content="ping")],
+            model="gpt-4.1-mini",
+            messages=[
+                ChatHistory(role="system", content=STATIC_GENERATOR_PROMPT),
+                ChatHistory(role="user", content="ping"),
+            ],
             prompt_variables=None,
-            agent_name="warmup",
+            agent_name="mentor-v1",
         )
-        logger.info("[warmup] LLM connection pre-warmed successfully")
+        logger.info("[warmup] LLM connection + prompt cache pre-warmed successfully")
     except Exception as e:
         logger.warning(f"[warmup] pre-warm failed (non-critical, app continues): {e}")
 

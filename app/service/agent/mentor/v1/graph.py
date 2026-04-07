@@ -222,8 +222,8 @@ def build_mentor_graph(
 
     # ── 노드 3: 문서 검색 ────────────────────────────────────
 
-    async def retrieve(state: MentoringState) -> MentoringState:
-        """확장된 쿼리로 병렬 검색 후 컨텍스트/출처 누산"""
+    async def retrieve(state: MentoringState) -> dict:
+        """확장된 쿼리로 병렬 검색 후 컨텍스트/출처 누산 — partial dict 반환"""
         all_context_parts: list[str] = []
         all_sources: list[dict] = []
         seen_titles: set[str] = set()
@@ -243,10 +243,9 @@ def build_mentor_graph(
                     seen_titles.add(title)
                     all_sources.append(src)
 
-        state["context"] = "\n\n---\n\n".join(all_context_parts)
-        state["sources"] = all_sources
+        merged_context = "\n\n---\n\n".join(all_context_parts)
         logger.info(f"[retrieve] queries={len(state['search_queries'])} sources={len(all_sources)}")
-        return state
+        return {"context": merged_context, "sources": all_sources}
 
     # ── 노드 4: 검색 결과 평가 ───────────────────────────────
 
@@ -590,6 +589,7 @@ async def run_pre_generate(
                     all_sources.append(src)
         state["context"] = "\n\n---\n\n".join(all_context_parts)
         state["sources"] = all_sources
+        logger.debug(f"[run_pre_generate] retrieve attempt={attempt} sources={len(all_sources)} ctx_len={len(state['context'])}")
 
         # 5. grade (규칙 기반)
         if len(all_sources) >= 1 and len(state["context"]) >= 100:
@@ -608,7 +608,8 @@ async def run_pre_generate(
         q = state["rewritten_query"]
         state["search_queries"] = [q] + [f"{p} {q}" for p in prefixes[:2]]
 
-    logger.info(f"[run_pre_generate] intent={state['intent']} sources={len(state['sources'])} retries={state['retry_count']}")
+    logger.info(f"[run_pre_generate] intent={state['intent']} sources={len(state.get('sources', []))} retries={state['retry_count']}")
+    logger.debug(f"[run_pre_generate] returning state keys={list(state.keys())} sources_count={len(state.get('sources', []))}")
     return state
 
 

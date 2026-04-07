@@ -198,6 +198,7 @@ class MentoringAgent(BaseAgent):
         )
 
         sources = state.get("sources", [])
+        logger.debug(f"[stream] run_pre_generate state keys={list(state.keys())} sources_count={len(sources)}")
         if sources:
             yield self._format_sse({"type": "sources", "sources": sources})
 
