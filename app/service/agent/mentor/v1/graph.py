@@ -45,6 +45,51 @@ logger = get_logging()
 MAX_RETRIES = 2    # 재검색 최대 횟수
 MAX_VALIDATE = 1   # 검증 실패 후 재생성 최대 횟수
 
+# ── Grade 임계값 상수 (모듈 레벨) ─────────────────────────────
+# RRF raw score 임계값: 양쪽 검색 모두 상위권에 등장해야 도달하는 수준
+# k=60, 양쪽 rank 1일 때 max = 0.5/61 + 0.5/61 ≈ 0.01639
+# 한쪽만 rank 1일 때 = 0.5/61 ≈ 0.008197
+# 임계값 0.005 = 한쪽 검색에서 최소 상위 40등 이내
+GRADE_RRF_RAW_THRESHOLD: float = 0.005
+# 벡터 유사도 임계값 (Azure AI Search @search.score, 코사인 유사도 기반)
+GRADE_VECTOR_SCORE_THRESHOLD: float = 0.75
+
+# ── 규칙 기반 수치 검증 (모듈 레벨, validate에서 사용) ─────────
+_NUMBER_PATTERN = re.compile(
+    r'(?:\d[\d,]*\.?\d*)\s*(?:조|억|만|원|%|퍼센트|명|개월|년|개|건|배)',
+)
+
+
+def _extract_numbers(text: str) -> set[str]:
+    """텍스트에서 단위 포함 수치 표현을 추출"""
+    return set(_NUMBER_PATTERN.findall(text))
+
+
+def _rule_based_number_check(answer: str, context: str) -> tuple[bool, str]:
+    """
+    답변의 구체적 수치가 컨텍스트에 근거가 있는지 규칙 기반 체크.
+    Returns: (pass여부, 사유)
+    """
+    answer_numbers = _extract_numbers(answer)
+    if not answer_numbers:
+        return True, ""
+
+    # 답변의 수치 중 컨텍스트에 없는 것 찾기
+    unsupported = []
+    for num in answer_numbers:
+        # 숫자 부분만 추출
+        num_digits = re.sub(r'[^\d.]', '', num)
+        if num_digits and len(num_digits) >= 2:  # 1자리 숫자는 무시
+            # 정확히 같은 표현이 있거나, 단어 경계로 숫자가 컨텍스트에 존재하면 OK
+            if num not in context and not re.search(
+                r'(?<!\d)' + re.escape(num_digits) + r'(?!\d)', context
+            ):
+                unsupported.append(num)
+
+    if len(unsupported) >= 3:
+        return False, f"참고자료에 없는 수치 다수 포함: {', '.join(list(unsupported)[:5])}"
+    return True, ""
+
 
 def reinforce_ije(text: str) -> str:
     """'이제' 접속어가 부족하면 자연스러운 위치에 삽입"""
@@ -252,7 +297,7 @@ def build_mentor_graph(
     # ── 노드 4: 검색 결과 평가 ───────────────────────────────
 
     async def grade(state: MentoringState) -> MentoringState:
-        """검색 컨텍스트가 질문에 답하기 충분한지 관련성 기반으로 판단"""
+        """검색 컨텍스트가 질문에 답하기 충분한지 다층 관련성 기반으로 판단"""
         context = state.get("context", "")
         sources = state.get("sources", [])
         query = state.get("original_query", state.get("query", ""))
@@ -266,8 +311,27 @@ def build_mentor_graph(
             )
             return state
 
-        # 2단계: 질문-컨텍스트 키워드 관련성 평가
-        # 질문에서 핵심 키워드 추출 (조사/어미 제거용 불용어 제외)
+        # 2단계: RRF 절대 점수 체크 (LLM 호출 없음)
+        top_rrf_raw = sources[0].get("rrf_score_raw", 0) if sources else 0
+        top_vector_score = sources[0].get("vector_score") if sources else None
+
+        rrf_pass = top_rrf_raw >= GRADE_RRF_RAW_THRESHOLD
+        vector_pass = (
+            top_vector_score is not None
+            and top_vector_score >= GRADE_VECTOR_SCORE_THRESHOLD
+        )
+
+        if not rrf_pass and not vector_pass:
+            state["grade_decision"] = "insufficient"
+            logger.info(
+                f"[grade] → insufficient (absolute score) "
+                f"(retry={state['retry_count']}, rrf_raw={top_rrf_raw:.6f}, "
+                f"vector_score={top_vector_score}, "
+                f"thresholds: rrf={GRADE_RRF_RAW_THRESHOLD}, vector={GRADE_VECTOR_SCORE_THRESHOLD})"
+            )
+            return state
+
+        # 3단계: 질문-컨텍스트 키워드 관련성 평가
         _STOPWORDS = {
             "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
             "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
@@ -276,7 +340,6 @@ def build_mentor_graph(
         query_tokens = set(query.replace("?", "").replace(".", "").split())
         query_keywords = {t for t in query_tokens if len(t) >= 2 and t not in _STOPWORDS}
 
-        # 컨텍스트에 질문 키워드가 얼마나 포함되어 있는지 계산
         context_lower = context.lower()
         matched = sum(1 for kw in query_keywords if kw.lower() in context_lower)
         relevance = matched / max(len(query_keywords), 1)
@@ -285,7 +348,6 @@ def build_mentor_graph(
         if relevance >= 0.3 and len(sources) >= 2:
             state["grade_decision"] = "sufficient"
         elif relevance >= 0.5:
-            # 관련성이 높으면 소스 1개라도 허용
             state["grade_decision"] = "sufficient"
         else:
             state["grade_decision"] = "insufficient"
@@ -294,7 +356,8 @@ def build_mentor_graph(
             f"[grade] → {state['grade_decision']} "
             f"(retry={state['retry_count']}, sources={len(sources)}, "
             f"ctx_len={len(context)}, relevance={relevance:.2f}, "
-            f"query_kw={len(query_keywords)}, matched={matched})"
+            f"query_kw={len(query_keywords)}, matched={matched}, "
+            f"rrf_raw={top_rrf_raw:.6f}, vector_score={top_vector_score})"
         )
         return state
 
@@ -417,7 +480,7 @@ def build_mentor_graph(
 
     async def validate(state: MentoringState) -> MentoringState:
         """생성된 답변이 SKMS 철학 및 사실 관계에 부합하는지 검증"""
-        # 1순위: followup 경로는 validate 무조건 스킵 (이전 context 재사용이므로 검증 불필요)
+        # 1순위: followup 경로는 validate 무조건 스킵
         if state.get("route") == "followup":
             state["validate_result"] = "pass"
             state["validate_reason"] = ""
@@ -431,12 +494,25 @@ def build_mentor_graph(
             logger.info("[validate] max_validate reached → force pass")
             return state
 
-        # 2순위: 인텐트 분류 신뢰도가 높아도 사실 근거 검증은 항상 수행
-        # (할루시네이션은 인텐트 신뢰도와 무관하게 발생하므로 스킵하지 않음)
+        # ── 사전 검증: 규칙 기반 수치 체크 (LLM 호출 전, 비용 0) ──
+        answer = state["answer"]
+        context = state.get("context", "")
+        number_pass, number_reason = _rule_based_number_check(answer, context)
 
+        if not number_pass:
+            state["validate_result"] = "fail"
+            state["validate_reason"] = number_reason
+            state["validate_count"] = state.get("validate_count", 0) + 1
+            logger.info(
+                f"[validate] FAIL (rule-based number check) "
+                f"reason={number_reason} count={state['validate_count']}"
+            )
+            return state
+
+        # ── LLM 기반 검증 ──
         prompt = VALIDATE_PROMPT.format(
-            context=state.get("context", "")[:1000],
-            answer=state["answer"],
+            context=context[:1000],
+            answer=answer,
             response_archetype=state.get("response_archetype", "standard"),
         )
         messages = [ChatHistory(role="user", content=prompt)]
@@ -631,23 +707,38 @@ async def run_pre_generate(
         state["sources"] = all_sources
         logger.debug(f"[run_pre_generate] retrieve attempt={attempt} sources={len(all_sources)} ctx_len={len(state['context'])}")
 
-        # 5. grade (관련성 기반)
-        _STOPWORDS_PRE = {
-            "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
-            "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
-            "회장님", "선대회장님", "하고", "되고", "잡으", "내라고",
-        }
-        q_tokens = set(query.replace("?", "").replace(".", "").split())
-        q_kws = {t for t in q_tokens if len(t) >= 2 and t not in _STOPWORDS_PRE}
-        ctx_lower = state["context"].lower()
-        matched_kw = sum(1 for kw in q_kws if kw.lower() in ctx_lower)
-        rel = matched_kw / max(len(q_kws), 1)
+        # 5. grade (다층 관련성 기반)
+        # 5a. RRF 절대 점수 + 벡터 유사도 체크
+        top_rrf_raw = all_sources[0].get("rrf_score_raw", 0) if all_sources else 0
+        top_vec_score = all_sources[0].get("vector_score") if all_sources else None
+        rrf_ok = top_rrf_raw >= GRADE_RRF_RAW_THRESHOLD
+        vec_ok = top_vec_score is not None and top_vec_score >= GRADE_VECTOR_SCORE_THRESHOLD
 
-        is_sufficient = (
-            len(all_sources) >= 1
-            and len(state["context"]) >= 100
-            and (rel >= 0.3 and len(all_sources) >= 2 or rel >= 0.5)
-        )
+        if not rrf_ok and not vec_ok:
+            is_sufficient = False
+            rel = 0.0
+            logger.info(
+                f"[run_pre_generate:grade] insufficient (absolute score) "
+                f"rrf_raw={top_rrf_raw:.6f}, vector_score={top_vec_score}"
+            )
+        else:
+            # 5b. 키워드 관련성 평가
+            _STOPWORDS_PRE = {
+                "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
+                "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
+                "회장님", "선대회장님", "하고", "되고", "잡으", "내라고",
+            }
+            q_tokens = set(query.replace("?", "").replace(".", "").split())
+            q_kws = {t for t in q_tokens if len(t) >= 2 and t not in _STOPWORDS_PRE}
+            ctx_lower = state["context"].lower()
+            matched_kw = sum(1 for kw in q_kws if kw.lower() in ctx_lower)
+            rel = matched_kw / max(len(q_kws), 1)
+
+            is_sufficient = (
+                len(all_sources) >= 1
+                and len(state["context"]) >= 100
+                and ((rel >= 0.3 and len(all_sources) >= 2) or rel >= 0.5)
+            )
         if is_sufficient:
             state["grade_decision"] = "sufficient"
             logger.info(f"[run_pre_generate:grade] sufficient (relevance={rel:.2f}, sources={len(all_sources)})")

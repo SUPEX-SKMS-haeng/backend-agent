@@ -338,6 +338,37 @@ class HybridSearchClient:
     # ── 결과 포맷팅 (기존 search_documents 출력 형식 호환) ──
 
     @staticmethod
+    def _compute_absolute_relevance(item: dict) -> float:
+        """
+        0~1 범위의 절대적 관련도 점수.
+        상대적 정규화(normalized_score)와 달리, 검색 결과가 무관해도 낮은 점수를 반환.
+        - vector_score: Azure AI Search 코사인 유사도 (0~1)
+        - rrf_score: 양쪽 검색 모두 상위권이어야 높은 값
+        - bm25_rank: 키워드 매칭 순위 (낮을수록 좋음)
+        """
+        signals: list[float] = []
+
+        # Signal 1: 벡터 유사도 (있으면, 이미 0~1 범위)
+        vec_score = item.get("vector_score")
+        if vec_score is not None and vec_score > 0:
+            signals.append(vec_score)
+
+        # Signal 2: RRF raw score 정규화
+        # 이론적 최댓값: 양쪽 rank 1일 때 = 2 × (0.5 / 61) ≈ 0.016393
+        rrf_raw = item.get("rrf_score", 0)
+        _RRF_THEORETICAL_MAX = (0.5 / (60 + 1)) * 2
+        rrf_normalized = min(rrf_raw / _RRF_THEORETICAL_MAX, 1.0)
+        signals.append(rrf_normalized)
+
+        # Signal 3: BM25 순위 기반 (rank 1~5: 좋음, 10+: 나쁨)
+        bm25_rank = item.get("bm25_rank")
+        if bm25_rank is not None:
+            rank_signal = max(0.0, 1.0 - (bm25_rank - 1) / 20.0)
+            signals.append(rank_signal)
+
+        return round(sum(signals) / len(signals), 4) if signals else 0.0
+
+    @staticmethod
     def _format_results(merged: list[dict]) -> tuple[str, list[dict]]:
         if not merged:
             return "", []
@@ -354,12 +385,24 @@ class HybridSearchClient:
                 logger.debug(f"[hybrid_search] RRF rank {i+1} 문서에 content 없음, skip: title={title}")
                 continue
 
+            abs_relevance = HybridSearchClient._compute_absolute_relevance(item)
+
+            # 절대 관련도 기반 신뢰도 등급
+            if abs_relevance >= 0.7:
+                confidence_level = "high"
+            elif abs_relevance >= 0.4:
+                confidence_level = "medium"
+            else:
+                confidence_level = "low"
+
             context_parts.append(f"[{title}]\n{content}")
             sources.append({
                 "index": i + 1,
                 "title": title,
                 "score": item.get("normalized_score", round(item["rrf_score"], 6)),
                 "rrf_score_raw": round(item["rrf_score"], 6),
+                "absolute_relevance": abs_relevance,
+                "confidence_level": confidence_level,
                 "bm25_score": item["bm25_score"],
                 "bm25_rank": item["bm25_rank"],
                 "vector_score": item["vector_score"],
