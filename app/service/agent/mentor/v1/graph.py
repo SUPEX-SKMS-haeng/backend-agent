@@ -50,9 +50,13 @@ MAX_VALIDATE = 1   # 검증 실패 후 재생성 최대 횟수
 # k=60, 양쪽 rank 1일 때 max = 0.5/61 + 0.5/61 ≈ 0.01639
 # 한쪽만 rank 1일 때 = 0.5/61 ≈ 0.008197
 # 임계값 0.005 = 한쪽 검색에서 최소 상위 40등 이내
-GRADE_RRF_RAW_THRESHOLD: float = 0.005
-# 벡터 유사도 임계값 (Azure AI Search @search.score, 코사인 유사도 기반)
-GRADE_VECTOR_SCORE_THRESHOLD: float = 0.75
+# 데이터 기반 튜닝 결과 (2026-04-08):
+# - 관련 질문 top-1 rrf_raw: 0.008~0.016, vec: 0.597~0.724
+# - 무관 질문 top-1 rrf_raw: 0.014~0.016, vec: 0.546~0.701
+# - RRF는 k=60 압축으로 구분력 낮음, 극단적 실패만 차단
+# - Vector score도 임베딩 특성상 완벽 구분 불가, 키워드 관련성과 조합 필요
+GRADE_RRF_RAW_THRESHOLD: float = 0.008   # BM25 단독 rank 1 수준
+GRADE_VECTOR_SCORE_THRESHOLD: float = 0.55  # 무관 질문 최솟값(0.546) 바로 위
 
 # ── 규칙 기반 수치 검증 (모듈 레벨, validate에서 사용) ─────────
 _NUMBER_PATTERN = re.compile(

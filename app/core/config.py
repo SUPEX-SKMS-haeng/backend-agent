@@ -40,12 +40,15 @@ class Settings(BaseSettings):
     AZURE_SEARCH_INDEX_NAME: str = ""
 
     # Hybrid Search (BM25 + Vector + Weighted RRF)
-    # TODO: 데이터 전량 적재 완료 후 Recall@K, MRR 기반으로 튜닝 필요
+    # 튜닝 기록 (2026-04-08): Playwright E2E 테스트 + 12개 쿼리 점수 수집 기반
+    # - BM25: 한국어 형태소 미분리(simple 모드)로 노이즈 높음 (NFT→BM25 rank 2)
+    # - Vector: 의미 검색이 관련 질문에서 더 안정적 (조직문화: BM25 rank 15, Vec rank 8)
+    # - Vector 가중치 0.6으로 상향하여 의미 검색 강화, BM25 노이즈 억제
     HYBRID_SEARCH_VECTOR_FIELD: str = "content_vector"
     HYBRID_SEARCH_TOP_N: int = 10
     HYBRID_SEARCH_K_NEAREST: int = 50
-    HYBRID_SEARCH_VECTOR_WEIGHT: float = 0.5
-    HYBRID_SEARCH_KEYWORD_WEIGHT: float = 0.5
+    HYBRID_SEARCH_VECTOR_WEIGHT: float = 0.6
+    HYBRID_SEARCH_KEYWORD_WEIGHT: float = 0.4
     HYBRID_SEARCH_RRF_K: int = 60
 
     # Arize Phoenix
