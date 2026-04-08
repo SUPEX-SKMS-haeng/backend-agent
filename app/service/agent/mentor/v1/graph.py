@@ -227,6 +227,11 @@ def build_mentor_graph(
             "인재", "채용", "평가", "보상", "승진", "리더십 개발",
             "인사", "교육", "역량", "성과 관리",
         ],
+        "off_topic": [
+            "nft", "블록체인", "bitcoin", "비트코인", "암호화폐", "가상화폐",
+            "이더리움", "코인", "채굴", "요리", "레시피", "점심", "저녁",
+            "게임", "스포츠", "날씨", "주식 종목", "주가", "맛집",
+        ],
     }
 
     async def intent_classify(state: MentoringState) -> MentoringState:
@@ -306,6 +311,12 @@ def build_mentor_graph(
         sources = state.get("sources", [])
         query = state.get("original_query", state.get("query", ""))
 
+        # 0단계: off_topic 인텐트 즉시 차단
+        if state.get("intent") == "off_topic":
+            state["grade_decision"] = "insufficient"
+            logger.info("[grade] off_topic 질문으로 분류되어 즉시 insufficient")
+            return state
+
         # 1단계: 기본 필터 (소스 없거나 너무 짧으면 바로 insufficient)
         if len(sources) < 1 or len(context) < 100:
             state["grade_decision"] = "insufficient"
@@ -335,7 +346,15 @@ def build_mentor_graph(
             )
             return state
 
-        # 3단계: 질문-컨텍스트 키워드 관련성 평가
+        # 3단계: absolute_relevance 절대 신뢰도 체크
+        # 모든 소스의 absolute_relevance가 0.4 미만이면 insufficient
+        # 단, 소스 자체가 0개면 이 단계 스킵 (폴백 유지)
+        if sources and all(s.get("absolute_relevance", 0.0) < 0.4 for s in sources):
+            state["grade_decision"] = "insufficient"
+            logger.info("[grade] 3단계 실패: 모든 소스의 absolute_relevance < 0.4")
+            return state
+
+        # 4단계: 질문-컨텍스트 키워드 관련성 평가
         _STOPWORDS = {
             "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
             "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
@@ -672,6 +691,7 @@ async def run_pre_generate(
         "crisis": ["위기", "리스크", "재무 위기", "대외 이슈", "위기관리", "리스크 대응", "위험", "불확실"],
         "supex": ["SUPEX", "수펙스", "패기", "도전 목표", "실행 방법론", "목표 설정", "도전", "초일류"],
         "hr": ["인재", "채용", "평가", "보상", "승진", "리더십 개발", "인사", "교육", "역량", "성과 관리"],
+        "off_topic": ["nft", "블록체인", "bitcoin", "비트코인", "암호화폐", "가상화폐", "이더리움", "코인", "채굴", "요리", "레시피", "점심", "저녁", "게임", "스포츠", "날씨", "주식 종목", "주가", "맛집"],
     }
     q_lower = query.lower()
     best_intent, best_score = "general", 0
@@ -718,13 +738,22 @@ async def run_pre_generate(
         rrf_ok = top_rrf_raw >= GRADE_RRF_RAW_THRESHOLD
         vec_ok = top_vec_score is not None and top_vec_score >= GRADE_VECTOR_SCORE_THRESHOLD
 
-        if not rrf_ok and not vec_ok:
+        # off_topic 인텐트 즉시 차단
+        if state.get("intent") == "off_topic":
+            is_sufficient = False
+            rel = 0.0
+            logger.info("[run_pre_generate:grade] off_topic 질문으로 분류되어 insufficient")
+        elif not rrf_ok and not vec_ok:
             is_sufficient = False
             rel = 0.0
             logger.info(
                 f"[run_pre_generate:grade] insufficient (absolute score) "
                 f"rrf_raw={top_rrf_raw:.6f}, vector_score={top_vec_score}"
             )
+        elif all_sources and all(s.get("absolute_relevance", 0.0) < 0.4 for s in all_sources):
+            is_sufficient = False
+            rel = 0.0
+            logger.info("[run_pre_generate:grade] insufficient (모든 소스 absolute_relevance < 0.4)")
         else:
             # 5b. 키워드 관련성 평가
             _STOPWORDS_PRE = {
