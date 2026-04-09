@@ -13,8 +13,10 @@ import re
 import time
 from typing import AsyncGenerator
 
-from common.util.llm_gateway_client import LLMGatewayClient
+from sqlalchemy.orm import Session
+
 from common.util.hybrid_search_client import hybrid_search_documents
+from common.util.llm_gateway_client import LLMGatewayClient
 from core.config import get_setting
 from core.log.logging import get_logging
 from service.agent.base import BaseAgent
@@ -28,7 +30,6 @@ from service.agent.mentor.v1.graph import (
 from service.agent.mentor.v1.prompts import GENERATE_PROMPT, GRADE_PROMPT, INTENT_PROMPT, REWRITE_PROMPT
 from service.agent.registry import register
 from service.model.agent import AgentRequest, AgentResponse, ChatHistory
-from sqlalchemy.orm import Session
 
 logger = get_logging()
 settings = get_setting()
@@ -43,23 +44,23 @@ class MentoringAgent(BaseAgent):
 
     # 인텐트별 우선 검색 인덱스 매핑 (설정이 없으면 기본 인덱스 사용)
     _INTENT_INDEX_MAP: dict[str, str | None] = {
-        "strategy": "sk_books",           # 경영전략, 사업방향 → 어록집/서적
-        "culture":  "sk_history_archive",  # 조직문화, VWBE → 사보/역사
-        "crisis":   "sk_skms",             # 위기관리 → SKMS
-        "supex":    "sk_skms",             # SUPEX, 경영체계 → SKMS
-        "hr":       "sk_books",            # 인재육성, 리더십 → 어록집/서적
-        "general":  None,                  # 기본 인덱스
+        "strategy": "sk_books",  # 경영전략, 사업방향 → 어록집/서적
+        "culture": "sk_history_archive",  # 조직문화, VWBE → 사보/역사
+        "crisis": "sk_skms",  # 위기관리 → SKMS
+        "supex": "sk_skms",  # SUPEX, 경영체계 → SKMS
+        "hr": "sk_books",  # 인재육성, 리더십 → 어록집/서적
+        "general": None,  # 기본 인덱스
     }
 
     # 인텐트별 보조 검색 인덱스 — 주 인덱스에 없는 관점 보완
     # SKMS 원문은 모든 답변의 철학적 근거이므로, 주 인덱스가 sk_skms가 아닌 경우 보조 검색
     _DIVERSITY_SUPPLEMENTARY_MAP: dict[str, list[str]] = {
-        "strategy": ["sk_skms"],              # 전략 → SKMS 원문 보완
-        "culture":  ["sk_skms"],              # 문화 → SKMS 원문 보완
-        "hr":       ["sk_skms"],              # 인재 → SKMS 원문 보완
-        "crisis":   ["sk_history_archive"],   # 위기 → 사보/역사 사례 보완
-        "supex":    ["sk_history_archive"],   # SUPEX → 사보/역사 사례 보완
-        "general":  ["sk_skms"],              # 일반 → SKMS 원문 보완
+        "strategy": ["sk_skms"],  # 전략 → SKMS 원문 보완
+        "culture": ["sk_skms"],  # 문화 → SKMS 원문 보완
+        "hr": ["sk_skms"],  # 인재 → SKMS 원문 보완
+        "crisis": ["sk_history_archive"],  # 위기 → 사보/역사 사례 보완
+        "supex": ["sk_history_archive"],  # SUPEX → 사보/역사 사례 보완
+        "general": ["sk_skms"],  # 일반 → SKMS 원문 보완
     }
 
     # 보조 인덱스에서 가져올 최소/최대 문서 수
@@ -71,14 +72,30 @@ class MentoringAgent(BaseAgent):
         import asyncio
 
         intent = (metadata or {}).get("intent", "general")
+        original_query = (metadata or {}).get("original_query", query)
         index_name = self._INTENT_INDEX_MAP.get(intent)  # None이면 settings 기본값 사용
         supplementary_indices = self._DIVERSITY_SUPPLEMENTARY_MAP.get(intent, [])
 
         # 주 인덱스 + 보조 인덱스 병렬 검색
-        tasks = [hybrid_search_documents(query, index_name=index_name)]
+        tasks = [
+            hybrid_search_documents(
+                query,
+                index_name=index_name,
+                vector_query=original_query,
+                intent=intent,
+            )
+        ]
         for sup_index in supplementary_indices:
             if sup_index != index_name:  # 주 인덱스와 동일하면 스킵
-                tasks.append(hybrid_search_documents(query, index_name=sup_index, top=self._DIVERSITY_MAX))
+                tasks.append(
+                    hybrid_search_documents(
+                        query,
+                        index_name=sup_index,
+                        top=self._DIVERSITY_MAX,
+                        vector_query=original_query,
+                        intent=intent,
+                    )
+                )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -93,20 +110,17 @@ class MentoringAgent(BaseAgent):
         # 보조 검색 결과 — 주 결과에 없는 문서만 추가 (다양성 강제)
         seen_titles = {s.get("title", "") for s in main_sources}
         supplementary_sources: list[dict] = []
-        supplementary_contexts: list[str] = []
 
-        for i, res in enumerate(results[1:], start=1):
+        for _i, res in enumerate(results[1:], start=1):
             if isinstance(res, Exception):
                 logger.warning(f"[_retrieve] 보조 인덱스 검색 실패: {res}")
                 continue
-            sup_ctx, sup_srcs = res
+            _sup_ctx, sup_srcs = res
             for src in sup_srcs:
                 title = src.get("title", "")
                 if title not in seen_titles and len(supplementary_sources) < self._DIVERSITY_MAX:
                     seen_titles.add(title)
                     supplementary_sources.append(src)
-            if sup_ctx:
-                supplementary_contexts.append(sup_ctx)
 
         if supplementary_sources:
             logger.info(
@@ -114,26 +128,43 @@ class MentoringAgent(BaseAgent):
                 f"main={len(main_sources)} supplementary={len(supplementary_sources)}"
             )
 
-        # 컨텍스트 병합: 주 + 보조
-        all_contexts = [main_context] + supplementary_contexts if supplementary_contexts else [main_context]
-        merged_context = "\n\n---\n\n".join(c for c in all_contexts if c)
+        # 소스 병합 후 인덱스 재번호 + 컨텍스트 재구성
         merged_sources = main_sources + supplementary_sources
+        for i, src in enumerate(merged_sources, 1):
+            src["index"] = i
+
+        # 정확한 자료 번호가 반영된 컨텍스트 재구성
+        context_parts: list[str] = []
+        for src in merged_sources:
+            if not src.get("included_in_context", True):
+                continue
+            content = src.get("content", "")
+            if not content:
+                continue
+            ctx_desc = src.get("context_desc", "")
+            if ctx_desc:
+                context_parts.append(
+                    f"[자료 {src['index']}: {src['title']}]\n[맥락: {ctx_desc}]\n{content}"
+                )
+            else:
+                context_parts.append(f"[자료 {src['index']}: {src['title']}]\n{content}")
+        merged_context = "\n\n---\n\n".join(context_parts)
 
         return merged_context, merged_sources
 
     def _build_log_metadata(self, graph_result: dict) -> dict:
         """로그에 저장할 메타데이터 구성"""
         return {
-            "intent":        graph_result.get("intent", ""),
-            "confidence":    graph_result.get("intent_confidence", 0.0),
-            "grade":         graph_result.get("grade_decision", ""),
-            "retry_count":   graph_result.get("retry_count", 0),
-            "validate":      graph_result.get("validate_result", ""),
+            "intent": graph_result.get("intent", ""),
+            "confidence": graph_result.get("intent_confidence", 0.0),
+            "grade": graph_result.get("grade_decision", ""),
+            "retry_count": graph_result.get("retry_count", 0),
+            "validate": graph_result.get("validate_result", ""),
             "sources_count": len(graph_result.get("sources", [])),
             "prompts": {
-                "intent":   INTENT_PROMPT,
-                "grade":    GRADE_PROMPT,
-                "rewrite":  REWRITE_PROMPT if graph_result.get("retry_count", 0) > 0 else None,
+                "intent": INTENT_PROMPT,
+                "grade": GRADE_PROMPT,
+                "rewrite": REWRITE_PROMPT if graph_result.get("retry_count", 0) > 0 else None,
                 "generate": GENERATE_PROMPT,
             },
         }
@@ -152,42 +183,37 @@ class MentoringAgent(BaseAgent):
             agent_name=f"{self.name}-{self.version}",
         )
 
-        chat_history = [
-            {"role": msg.role.value, "content": msg.content}
-            for msg in request.chat_history
-        ]
+        chat_history = [{"role": msg.role.value, "content": msg.content} for msg in request.chat_history]
 
         # chat_history에서 사용자 턴 수 역산
         user_turn_count = len([m for m in chat_history if m["role"] == "user"])
 
         initial_state = {
-            "query":             request.query,
-            "original_query":    request.query,
-            "chat_history":      chat_history,
-            "intent":            "general",
+            "query": request.query,
+            "original_query": request.query,
+            "chat_history": chat_history,
+            "intent": "general",
             "intent_confidence": 0.0,
-            "search_queries":    [],
-            "context":           "",
-            "sources":           [],
-            "grade_decision":    "insufficient",
-            "rewritten_query":   "",
-            "retry_count":       0,
-            "answer":            "",
-            "validate_result":   "pass",
-            "validate_reason":   "",
-            "validate_count":    0,
+            "search_queries": [],
+            "context": "",
+            "sources": [],
+            "grade_decision": "insufficient",
+            "rewritten_query": "",
+            "retry_count": 0,
+            "answer": "",
+            "validate_result": "pass",
+            "validate_reason": "",
+            "validate_count": 0,
             # 응답 아키타입 관리
-            "response_archetype":  "",
+            "response_archetype": "",
             "previous_archetypes": [],
-            "turn_count":          user_turn_count,
-            "previous_answer":     "",
+            "turn_count": user_turn_count,
+            "previous_answer": "",
         }
 
         return await graph.ainvoke(initial_state)
 
-    async def invoke(
-        self, request: AgentRequest, user: dict, *, db: Session, response_mode: str
-    ) -> AgentResponse:
+    async def invoke(self, request: AgentRequest, user: dict, *, db: Session, response_mode: str) -> AgentResponse:
         """비스트리밍: 그래프 실행 → DB 저장 → JSON 응답"""
         start_time = time.time()
         result = await self._run_graph(request, user)
@@ -196,7 +222,10 @@ class MentoringAgent(BaseAgent):
         log_meta = self._build_log_metadata(result)
         log_meta["elapsed_seconds"] = elapsed_seconds
         self._save_log(
-            db, request, user, response_mode,
+            db,
+            request,
+            user,
+            response_mode,
             answer=result.get("answer", ""),
             sources=result.get("sources", []),
             log_metadata=log_meta,
@@ -206,10 +235,10 @@ class MentoringAgent(BaseAgent):
             answer=result.get("answer", ""),
             sources=result.get("sources", []),
             metadata={
-                "intent":          result.get("intent", ""),
-                "grade":           result.get("grade_decision", ""),
-                "retry_count":     result.get("retry_count", 0),
-                "validate":        result.get("validate_result", ""),
+                "intent": result.get("intent", ""),
+                "grade": result.get("grade_decision", ""),
+                "retry_count": result.get("retry_count", 0),
+                "validate": result.get("validate_result", ""),
                 "elapsed_seconds": elapsed_seconds,
             },
         )
@@ -221,32 +250,29 @@ class MentoringAgent(BaseAgent):
         start_time = time.time()
         client = self._get_client()
 
-        chat_history = [
-            {"role": msg.role.value, "content": msg.content}
-            for msg in request.chat_history
-        ]
+        chat_history = [{"role": msg.role.value, "content": msg.content} for msg in request.chat_history]
         user_turn_count = len([m for m in chat_history if m["role"] == "user"])
 
         initial_state = {
-            "query":             request.query,
-            "original_query":    request.query,
-            "chat_history":      chat_history,
-            "intent":            "general",
+            "query": request.query,
+            "original_query": request.query,
+            "chat_history": chat_history,
+            "intent": "general",
             "intent_confidence": 0.0,
-            "search_queries":    [],
-            "context":           "",
-            "sources":           [],
-            "grade_decision":    "insufficient",
-            "rewritten_query":   "",
-            "retry_count":       0,
-            "answer":            "",
-            "validate_result":   "pass",
-            "validate_reason":   "",
-            "validate_count":    0,
-            "response_archetype":  "",
+            "search_queries": [],
+            "context": "",
+            "sources": [],
+            "grade_decision": "insufficient",
+            "rewritten_query": "",
+            "retry_count": 0,
+            "answer": "",
+            "validate_result": "pass",
+            "validate_reason": "",
+            "validate_count": 0,
+            "response_archetype": "",
             "previous_archetypes": [],
-            "turn_count":          user_turn_count,
-            "previous_answer":     "",
+            "turn_count": user_turn_count,
+            "previous_answer": "",
         }
 
         # 1단계: generate 직전까지 실행 (검색 파이프라인)
@@ -301,17 +327,13 @@ class MentoringAgent(BaseAgent):
                         tag_buffer += content
                         # 태그가 완성되면 제거 후 나머지만 전송
                         if "-->" in tag_buffer:
-                            cleaned = re.sub(r'<!--archetype:\w+-->', '', tag_buffer)
+                            cleaned = re.sub(r"<!--archetype:\w+-->", "", tag_buffer)
                             if cleaned:
-                                yield self._format_sse({
-                                    "choices": [{"index": 0, "delta": {"content": cleaned}}]
-                                })
+                                yield self._format_sse({"choices": [{"index": 0, "delta": {"content": cleaned}}]})
                             tag_buffer = ""
                         # 태그 시작이 감지되지 않으면 바로 전송
                         elif "<" not in tag_buffer:
-                            yield self._format_sse({
-                                "choices": [{"index": 0, "delta": {"content": tag_buffer}}]
-                            })
+                            yield self._format_sse({"choices": [{"index": 0, "delta": {"content": tag_buffer}}]})
                             tag_buffer = ""
                         # "<"가 있지만 아직 "-->"가 안 왔으면 버퍼에 유지
                 except (json.JSONDecodeError, KeyError, IndexError):
@@ -319,11 +341,9 @@ class MentoringAgent(BaseAgent):
 
         # 버퍼에 남은 텍스트 전송 (태그가 아닌 경우)
         if tag_buffer:
-            cleaned = re.sub(r'<!--archetype:\w+-->', '', tag_buffer)
+            cleaned = re.sub(r"<!--archetype:\w+-->", "", tag_buffer)
             if cleaned:
-                yield self._format_sse({
-                    "choices": [{"index": 0, "delta": {"content": cleaned}}]
-                })
+                yield self._format_sse({"choices": [{"index": 0, "delta": {"content": cleaned}}]})
 
         # 아키타입 파싱 및 후처리
         archetype, clean_answer = parse_archetype(full_answer)
@@ -333,21 +353,26 @@ class MentoringAgent(BaseAgent):
 
         elapsed_seconds = round(time.time() - start_time, 1)
 
-        yield self._format_sse({
-            "type": "metadata",
-            "metadata": {
-                "intent":          state.get("intent", ""),
-                "grade":           state.get("grade_decision", ""),
-                "retry_count":     state.get("retry_count", 0),
-                "validate":        "skip",
-                "elapsed_seconds": elapsed_seconds,
-            },
-        })
+        yield self._format_sse(
+            {
+                "type": "metadata",
+                "metadata": {
+                    "intent": state.get("intent", ""),
+                    "grade": state.get("grade_decision", ""),
+                    "retry_count": state.get("retry_count", 0),
+                    "validate": "skip",
+                    "elapsed_seconds": elapsed_seconds,
+                },
+            }
+        )
 
         log_meta = self._build_log_metadata(state)
         log_meta["elapsed_seconds"] = elapsed_seconds
         self._save_log(
-            db, request, user, response_mode,
+            db,
+            request,
+            user,
+            response_mode,
             answer=clean_answer,
             sources=sources,
             log_metadata=log_meta,

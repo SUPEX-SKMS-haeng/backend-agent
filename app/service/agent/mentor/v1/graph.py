@@ -42,8 +42,8 @@ from service.model.agent import ChatHistory
 
 logger = get_logging()
 
-MAX_RETRIES = 2    # 재검색 최대 횟수
-MAX_VALIDATE = 1   # 검증 실패 후 재생성 최대 횟수
+MAX_RETRIES = 2  # 재검색 최대 횟수
+MAX_VALIDATE = 1  # 검증 실패 후 재생성 최대 횟수
 
 # ── Grade 임계값 상수 (모듈 레벨) ─────────────────────────────
 # RRF raw score 임계값: 양쪽 검색 모두 상위권에 등장해야 도달하는 수준
@@ -55,12 +55,12 @@ MAX_VALIDATE = 1   # 검증 실패 후 재생성 최대 횟수
 # - 무관 질문 top-1 rrf_raw: 0.014~0.016, vec: 0.546~0.701
 # - RRF는 k=60 압축으로 구분력 낮음, 극단적 실패만 차단
 # - Vector score도 임베딩 특성상 완벽 구분 불가, 키워드 관련성과 조합 필요
-GRADE_RRF_RAW_THRESHOLD: float = 0.008   # BM25 단독 rank 1 수준
+GRADE_RRF_RAW_THRESHOLD: float = 0.008  # BM25 단독 rank 1 수준
 GRADE_VECTOR_SCORE_THRESHOLD: float = 0.55  # 무관 질문 최솟값(0.546) 바로 위
 
 # ── 규칙 기반 수치 검증 (모듈 레벨, validate에서 사용) ─────────
 _NUMBER_PATTERN = re.compile(
-    r'(?:\d[\d,]*\.?\d*)\s*(?:조|억|만|원|%|퍼센트|명|개월|년|개|건|배)',
+    r"(?:\d[\d,]*\.?\d*)\s*(?:조|억|만|원|%|퍼센트|명|개월|년|개|건|배)",
 )
 
 
@@ -82,12 +82,10 @@ def _rule_based_number_check(answer: str, context: str) -> tuple[bool, str]:
     unsupported = []
     for num in answer_numbers:
         # 숫자 부분만 추출
-        num_digits = re.sub(r'[^\d.]', '', num)
+        num_digits = re.sub(r"[^\d.]", "", num)
         if num_digits and len(num_digits) >= 2:  # 1자리 숫자는 무시
             # 정확히 같은 표현이 있거나, 단어 경계로 숫자가 컨텍스트에 존재하면 OK
-            if num not in context and not re.search(
-                r'(?<!\d)' + re.escape(num_digits) + r'(?!\d)', context
-            ):
+            if num not in context and not re.search(r"(?<!\d)" + re.escape(num_digits) + r"(?!\d)", context):
                 unsupported.append(num)
 
     if len(unsupported) >= 3:
@@ -97,15 +95,15 @@ def _rule_based_number_check(answer: str, context: str) -> tuple[bool, str]:
 
 def reinforce_ije(text: str) -> str:
     """'이제' 접속어가 부족하면 자연스러운 위치에 삽입"""
-    sentences = text.split('. ')
-    ije_count = text.count('이제')
+    sentences = text.split(". ")
+    ije_count = text.count("이제")
     target_count = max(1, len(sentences) // 4)  # 4문장당 최소 1회
 
     if ije_count >= target_count:
         return text
 
-    ije_variants = ['이제 ', '이제, ', '이제 말이야, ']
-    transition_words = ['그래서', '그런데', '또', '그리고']
+    ije_variants = ["이제 ", "이제, ", "이제 말이야, "]
+    transition_words = ["그래서", "그런데", "또", "그리고"]
 
     inserted = 0
     for i in range(3, len(sentences), 4):
@@ -119,20 +117,21 @@ def reinforce_ije(text: str) -> str:
                     sentences[i] = sentence.replace(tw, random.choice(ije_variants), 1)
                     inserted += 1
                     break
-        elif not sentence.startswith('이제'):
+        elif not sentence.startswith("이제"):
             sentences[i] = random.choice(ije_variants) + sentence
             inserted += 1
 
-    return '. '.join(sentences)
+    return ". ".join(sentences)
+
 
 # ── 인텐트별 검색 쿼리 접두어 (규칙 기반, LLM 비용 없음) ─────
 _INTENT_SEARCH_PREFIX: dict[str, list[str]] = {
     "strategy": ["전략", "사업 방향"],
-    "culture":  ["조직문화", "VWBE 구성원"],
-    "crisis":   ["위기", "리스크 관리"],
-    "supex":    ["SUPEX 패기", "도전 목표"],
-    "hr":       ["인재 육성", "리더십"],
-    "general":  [],
+    "culture": ["조직문화", "VWBE 구성원"],
+    "crisis": ["위기", "리스크 관리"],
+    "supex": ["SUPEX 패기", "도전 목표"],
+    "hr": ["인재 육성", "리더십"],
+    "general": [],
 }
 
 
@@ -189,10 +188,7 @@ def build_mentor_graph(
             state["route"] = "new_query"
             return state
 
-        last_assistant = next(
-            (m["content"] for m in reversed(history) if m["role"] == "assistant"),
-            ""
-        )
+        last_assistant = next((m["content"] for m in reversed(history) if m["role"] == "assistant"), "")
         is_question_end = last_assistant.rstrip().endswith("?") or last_assistant.rstrip().endswith("까?")
 
         if is_question_end and len(query.strip()) < 80:
@@ -208,29 +204,82 @@ def build_mentor_graph(
     # ── 키워드 기반 인텐트 분류 (LLM 호출 제거) ──────────────
     _INTENT_KEYWORDS: dict[str, list[str]] = {
         "strategy": [
-            "전략", "사업 포트폴리오", "신사업", "M&A", "글로벌", "중장기",
-            "사업 방향", "투자", "포트폴리오", "성장 동력", "비전",
+            "전략",
+            "사업 포트폴리오",
+            "신사업",
+            "M&A",
+            "글로벌",
+            "중장기",
+            "사업 방향",
+            "투자",
+            "포트폴리오",
+            "성장 동력",
+            "비전",
         ],
         "culture": [
-            "조직문화", "VWBE", "구성원 행복", "팀워크", "구성원 육성",
-            "사기", "분위기", "소통", "협업", "행복",
+            "조직문화",
+            "VWBE",
+            "구성원 행복",
+            "팀워크",
+            "구성원 육성",
+            "사기",
+            "분위기",
+            "소통",
+            "협업",
+            "행복",
         ],
         "crisis": [
-            "위기", "리스크", "재무 위기", "대외 이슈", "위기관리",
-            "리스크 대응", "위험", "불확실",
+            "위기",
+            "리스크",
+            "재무 위기",
+            "대외 이슈",
+            "위기관리",
+            "리스크 대응",
+            "위험",
+            "불확실",
         ],
         "supex": [
-            "SUPEX", "수펙스", "패기", "도전 목표", "실행 방법론",
-            "목표 설정", "도전", "초일류",
+            "SUPEX",
+            "수펙스",
+            "패기",
+            "도전 목표",
+            "실행 방법론",
+            "목표 설정",
+            "도전",
+            "초일류",
         ],
         "hr": [
-            "인재", "채용", "평가", "보상", "승진", "리더십 개발",
-            "인사", "교육", "역량", "성과 관리",
+            "인재",
+            "채용",
+            "평가",
+            "보상",
+            "승진",
+            "리더십 개발",
+            "인사",
+            "교육",
+            "역량",
+            "성과 관리",
         ],
         "off_topic": [
-            "nft", "블록체인", "bitcoin", "비트코인", "암호화폐", "가상화폐",
-            "이더리움", "코인", "채굴", "요리", "레시피", "점심", "저녁",
-            "게임", "스포츠", "날씨", "주식 종목", "주가", "맛집",
+            "nft",
+            "블록체인",
+            "bitcoin",
+            "비트코인",
+            "암호화폐",
+            "가상화폐",
+            "이더리움",
+            "코인",
+            "채굴",
+            "요리",
+            "레시피",
+            "점심",
+            "저녁",
+            "게임",
+            "스포츠",
+            "날씨",
+            "주식 종목",
+            "주가",
+            "맛집",
         ],
     }
 
@@ -285,9 +334,12 @@ def build_mentor_graph(
         seen_titles: set[str] = set()
 
         # 모든 쿼리를 병렬로 실행
+        original_query = state["original_query"]
         results = await asyncio.gather(
-            *(retrieve_fn(query, {"intent": state["intent"]})
-              for query in state["search_queries"])
+            *(
+                retrieve_fn(query, {"intent": state["intent"], "original_query": original_query})
+                for query in state["search_queries"]
+            )
         )
 
         for ctx, srcs in results:
@@ -331,10 +383,7 @@ def build_mentor_graph(
         top_vector_score = sources[0].get("vector_score") if sources else None
 
         rrf_pass = top_rrf_raw >= GRADE_RRF_RAW_THRESHOLD
-        vector_pass = (
-            top_vector_score is not None
-            and top_vector_score >= GRADE_VECTOR_SCORE_THRESHOLD
-        )
+        vector_pass = top_vector_score is not None and top_vector_score >= GRADE_VECTOR_SCORE_THRESHOLD
 
         if not rrf_pass and not vector_pass:
             state["grade_decision"] = "insufficient"
@@ -356,9 +405,27 @@ def build_mentor_graph(
 
         # 4단계: 질문-컨텍스트 키워드 관련성 평가
         _STOPWORDS = {
-            "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
-            "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
-            "회장님", "선대회장님", "하고", "되고", "잡으", "내라고",
+            "입니다",
+            "합니다",
+            "있습니다",
+            "했습니다",
+            "하면",
+            "때는",
+            "어떻게",
+            "무엇",
+            "왜",
+            "어떤",
+            "이걸",
+            "그걸",
+            "저는",
+            "우리",
+            "자네",
+            "회장님",
+            "선대회장님",
+            "하고",
+            "되고",
+            "잡으",
+            "내라고",
         }
         query_tokens = set(query.replace("?", "").replace(".", "").split())
         query_keywords = {t for t in query_tokens if len(t) >= 2 and t not in _STOPWORDS}
@@ -400,10 +467,7 @@ def build_mentor_graph(
         state["context"] = ""
         state["sources"] = []
 
-        logger.info(
-            f"[rewrite] attempt={state['retry_count']} "
-            f"'{state['original_query'][:20]}' → '{rewritten[:30]}'"
-        )
+        logger.info(f"[rewrite] attempt={state['retry_count']} '{state['original_query'][:20]}' → '{rewritten[:30]}'")
         return state
 
     # ── 노드 6: 최종 답변 생성 (PERSONA 주입 대상) ──────────
@@ -431,10 +495,12 @@ def build_mentor_graph(
 
         # 검증 실패 피드백이 있으면 재생성 요청으로 추가
         if state.get("validate_reason"):
-            messages.append(ChatHistory(
-                role="system",
-                content=f"[이전 답변 수정 요청] {state['validate_reason']}",
-            ))
+            messages.append(
+                ChatHistory(
+                    role="system",
+                    content=f"[이전 답변 수정 요청] {state['validate_reason']}",
+                )
+            )
 
         # 인텐트 기반 토크타입 가이드 선택
         intent = state.get("intent", "general")
@@ -454,9 +520,12 @@ def build_mentor_graph(
 
         # generate는 캐시 로깅을 위해 직접 client 호출
         result = await client.call_completions_non_stream(
-            user_id=user_id, org_id=org_id,
-            provider=provider, model=model,
-            messages=messages, prompt_variables=None,
+            user_id=user_id,
+            org_id=org_id,
+            provider=provider,
+            model=model,
+            messages=messages,
+            prompt_variables=None,
             agent_name=agent_name,
         )
         if "choices" in result:
@@ -467,18 +536,15 @@ def build_mentor_graph(
         # 캐시 히트 로깅 (Azure OpenAI auto prefix caching)
         try:
             usage = result.get("usage", {})
-            cached = (
-                usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                if isinstance(usage, dict) else 0
-            )
+            cached = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0) if isinstance(usage, dict) else 0
             logger.info(f"[generate] cached_tokens={cached}, total_input={usage.get('prompt_tokens', 'N/A')}")
         except Exception:
             pass
 
         # 아키타입 태그 파싱 및 제거
-        archetype_match = re.search(r'<!--archetype:(\w+)-->', answer)
+        archetype_match = re.search(r"<!--archetype:(\w+)-->", answer)
         current_archetype = archetype_match.group(1) if archetype_match else "standard"
-        clean_answer = re.sub(r'<!--archetype:\w+-->', '', answer).strip()
+        clean_answer = re.sub(r"<!--archetype:\w+-->", "", answer).strip()
 
         # "이제" 접속어 후처리 보강
         clean_answer = reinforce_ije(clean_answer)
@@ -527,8 +593,7 @@ def build_mentor_graph(
             state["validate_reason"] = number_reason
             state["validate_count"] = state.get("validate_count", 0) + 1
             logger.info(
-                f"[validate] FAIL (rule-based number check) "
-                f"reason={number_reason} count={state['validate_count']}"
+                f"[validate] FAIL (rule-based number check) reason={number_reason} count={state['validate_count']}"
             )
             return state
 
@@ -576,12 +641,12 @@ def build_mentor_graph(
 
     graph.add_node("conversation_router", conversation_router)
     graph.add_node("intent_classify", intent_classify)
-    graph.add_node("query_expand",    query_expand)
-    graph.add_node("retrieve",        retrieve)
-    graph.add_node("grade",           grade)
-    graph.add_node("rewrite",         rewrite)
-    graph.add_node("generate",        generate)
-    graph.add_node("validate",        validate)
+    graph.add_node("query_expand", query_expand)
+    graph.add_node("retrieve", retrieve)
+    graph.add_node("grade", grade)
+    graph.add_node("rewrite", rewrite)
+    graph.add_node("generate", generate)
+    graph.add_node("validate", validate)
 
     graph.set_entry_point("conversation_router")
 
@@ -590,26 +655,34 @@ def build_mentor_graph(
         lambda s: s["route"],
         {
             "new_query": "intent_classify",
-            "followup":  "generate",   # RAG 전체 스킵, 이전 context 재사용
-        }
+            "followup": "generate",  # RAG 전체 스킵, 이전 context 재사용
+        },
     )
 
     graph.add_edge("intent_classify", "query_expand")
-    graph.add_edge("query_expand",    "retrieve")
-    graph.add_edge("retrieve",        "grade")
+    graph.add_edge("query_expand", "retrieve")
+    graph.add_edge("retrieve", "grade")
 
-    graph.add_conditional_edges("grade", after_grade, {
-        "generate": "generate",
-        "rewrite":  "rewrite",
-    })
+    graph.add_conditional_edges(
+        "grade",
+        after_grade,
+        {
+            "generate": "generate",
+            "rewrite": "rewrite",
+        },
+    )
 
-    graph.add_edge("rewrite",  "query_expand")   # 리라이팅 후 쿼리 재확장
+    graph.add_edge("rewrite", "query_expand")  # 리라이팅 후 쿼리 재확장
     graph.add_edge("generate", "validate")
 
-    graph.add_conditional_edges("validate", after_validate, {
-        END:        END,
-        "generate": "generate",
-    })
+    graph.add_conditional_edges(
+        "validate",
+        after_validate,
+        {
+            END: END,
+            "generate": "generate",
+        },
+    )
 
     return graph.compile()
 
@@ -629,9 +702,13 @@ def build_pre_generate_graph(
     """
     # build_mentor_graph와 동일한 노드를 재생성 (클로저 필요)
     full_graph_compiled = build_mentor_graph(
-        client=client, user_id=user_id, org_id=org_id,
-        provider=provider, model=model,
-        retrieve_fn=retrieve_fn, agent_name=agent_name,
+        client=client,
+        user_id=user_id,
+        org_id=org_id,
+        provider=provider,
+        model=model,
+        retrieve_fn=retrieve_fn,
+        agent_name=agent_name,
     )
     # 대신 간단히 파이프라인 함수로 구현
     return full_graph_compiled  # 아래 run_pre_generate에서 직접 처리
@@ -654,9 +731,12 @@ async def run_pre_generate(
 
     async def _call_llm(messages):
         result = await client.call_completions_non_stream(
-            user_id=user_id, org_id=org_id,
-            provider=provider, model=model,
-            messages=messages, prompt_variables=None,
+            user_id=user_id,
+            org_id=org_id,
+            provider=provider,
+            model=model,
+            messages=messages,
+            prompt_variables=None,
             agent_name=agent_name,
         )
         if "choices" in result:
@@ -669,15 +749,16 @@ async def run_pre_generate(
     if not history:
         state["route"] = "new_query"
     else:
-        last_assistant = next(
-            (m["content"] for m in reversed(history) if m["role"] == "assistant"), ""
-        )
+        last_assistant = next((m["content"] for m in reversed(history) if m["role"] == "assistant"), "")
         is_q = last_assistant.rstrip().endswith("?") or last_assistant.rstrip().endswith("까?")
         state["route"] = "followup" if is_q and len(query.strip()) < 80 else "new_query"
 
     if state["route"] == "followup":
         # followup: 인텐트/쿼리확장 생략, RAG 검색만 1회 수행하여 sources 확보
-        ctx, srcs = await retrieve_fn(query, {"intent": state.get("intent", "general")})
+        ctx, srcs = await retrieve_fn(
+            query,
+            {"intent": state.get("intent", "general"), "original_query": state.get("original_query", query)},
+        )
         state["context"] = ctx or ""
         state["sources"] = srcs or []
         state["grade_decision"] = "sufficient" if srcs else "insufficient"
@@ -686,12 +767,55 @@ async def run_pre_generate(
 
     # 2. intent_classify (키워드 기반)
     _INTENT_KEYWORDS = {
-        "strategy": ["전략", "사업 포트폴리오", "신사업", "M&A", "글로벌", "중장기", "사업 방향", "투자", "포트폴리오", "성장 동력", "비전"],
-        "culture": ["조직문화", "VWBE", "구성원 행복", "팀워크", "구성원 육성", "사기", "분위기", "소통", "협업", "행복"],
+        "strategy": [
+            "전략",
+            "사업 포트폴리오",
+            "신사업",
+            "M&A",
+            "글로벌",
+            "중장기",
+            "사업 방향",
+            "투자",
+            "포트폴리오",
+            "성장 동력",
+            "비전",
+        ],
+        "culture": [
+            "조직문화",
+            "VWBE",
+            "구성원 행복",
+            "팀워크",
+            "구성원 육성",
+            "사기",
+            "분위기",
+            "소통",
+            "협업",
+            "행복",
+        ],
         "crisis": ["위기", "리스크", "재무 위기", "대외 이슈", "위기관리", "리스크 대응", "위험", "불확실"],
         "supex": ["SUPEX", "수펙스", "패기", "도전 목표", "실행 방법론", "목표 설정", "도전", "초일류"],
         "hr": ["인재", "채용", "평가", "보상", "승진", "리더십 개발", "인사", "교육", "역량", "성과 관리"],
-        "off_topic": ["nft", "블록체인", "bitcoin", "비트코인", "암호화폐", "가상화폐", "이더리움", "코인", "채굴", "요리", "레시피", "점심", "저녁", "게임", "스포츠", "날씨", "주식 종목", "주가", "맛집"],
+        "off_topic": [
+            "nft",
+            "블록체인",
+            "bitcoin",
+            "비트코인",
+            "암호화폐",
+            "가상화폐",
+            "이더리움",
+            "코인",
+            "채굴",
+            "요리",
+            "레시피",
+            "점심",
+            "저녁",
+            "게임",
+            "스포츠",
+            "날씨",
+            "주식 종목",
+            "주가",
+            "맛집",
+        ],
     }
     q_lower = query.lower()
     best_intent, best_score = "general", 0
@@ -717,7 +841,13 @@ async def run_pre_generate(
     for attempt in range(MAX_RETRIES + 1):
         all_context_parts, all_sources, seen_titles = [], [], set()
         results = await asyncio.gather(
-            *(retrieve_fn(sq, {"intent": state["intent"]}) for sq in state["search_queries"])
+            *(
+                retrieve_fn(
+                    sq,
+                    {"intent": state["intent"], "original_query": state.get("original_query", sq)},
+                )
+                for sq in state["search_queries"]
+            )
         )
         for ctx, srcs in results:
             if ctx:
@@ -729,7 +859,9 @@ async def run_pre_generate(
                     all_sources.append(src)
         state["context"] = "\n\n---\n\n".join(all_context_parts)
         state["sources"] = all_sources
-        logger.debug(f"[run_pre_generate] retrieve attempt={attempt} sources={len(all_sources)} ctx_len={len(state['context'])}")
+        logger.debug(
+            f"[run_pre_generate] retrieve attempt={attempt} sources={len(all_sources)} ctx_len={len(state['context'])}"
+        )
 
         # 5. grade (다층 관련성 기반)
         # 5a. RRF 절대 점수 + 벡터 유사도 체크
@@ -757,9 +889,27 @@ async def run_pre_generate(
         else:
             # 5b. 키워드 관련성 평가
             _STOPWORDS_PRE = {
-                "입니다", "합니다", "있습니다", "했습니다", "하면", "때는", "어떻게",
-                "무엇", "왜", "어떤", "이걸", "그걸", "저는", "우리", "자네",
-                "회장님", "선대회장님", "하고", "되고", "잡으", "내라고",
+                "입니다",
+                "합니다",
+                "있습니다",
+                "했습니다",
+                "하면",
+                "때는",
+                "어떻게",
+                "무엇",
+                "왜",
+                "어떤",
+                "이걸",
+                "그걸",
+                "저는",
+                "우리",
+                "자네",
+                "회장님",
+                "선대회장님",
+                "하고",
+                "되고",
+                "잡으",
+                "내라고",
             }
             q_tokens = set(query.replace("?", "").replace(".", "").split())
             q_kws = {t for t in q_tokens if len(t) >= 2 and t not in _STOPWORDS_PRE}
@@ -783,6 +933,7 @@ async def run_pre_generate(
 
         # rewrite
         from service.model.agent import ChatHistory as CH
+
         rewrite_prompt = REWRITE_PROMPT.format(query=state["query"])
         rewritten = await _call_llm([CH(role="user", content=rewrite_prompt)])
         state["rewritten_query"] = rewritten.strip()
@@ -790,8 +941,12 @@ async def run_pre_generate(
         q = state["rewritten_query"]
         state["search_queries"] = [q] + [f"{p} {q}" for p in prefixes[:2]]
 
-    logger.info(f"[run_pre_generate] intent={state['intent']} sources={len(state.get('sources', []))} retries={state['retry_count']}")
-    logger.debug(f"[run_pre_generate] returning state keys={list(state.keys())} sources_count={len(state.get('sources', []))}")
+    logger.info(
+        f"[run_pre_generate] intent={state['intent']} sources={len(state.get('sources', []))} retries={state['retry_count']}"
+    )
+    logger.debug(
+        f"[run_pre_generate] returning state keys={list(state.keys())} sources_count={len(state.get('sources', []))}"
+    )
     return state
 
 
@@ -815,10 +970,12 @@ def build_generate_messages(state: dict) -> list:
         messages.append(CH(role=msg["role"], content=msg["content"]))
 
     if state.get("validate_reason"):
-        messages.append(CH(
-            role="system",
-            content=f"[이전 답변 수정 요청] {state['validate_reason']}",
-        ))
+        messages.append(
+            CH(
+                role="system",
+                content=f"[이전 답변 수정 요청] {state['validate_reason']}",
+            )
+        )
 
     # 인텐트 기반 토크타입 가이드 선택
     intent = state.get("intent", "general")
@@ -841,7 +998,7 @@ def build_generate_messages(state: dict) -> list:
 
 def parse_archetype(answer: str) -> tuple[str, str]:
     """아키타입 태그 파싱 및 제거. (archetype, clean_answer) 반환"""
-    archetype_match = re.search(r'<!--archetype:(\w+)-->', answer)
+    archetype_match = re.search(r"<!--archetype:(\w+)-->", answer)
     current_archetype = archetype_match.group(1) if archetype_match else "standard"
-    clean_answer = re.sub(r'<!--archetype:\w+-->', '', answer).strip()
+    clean_answer = re.sub(r"<!--archetype:\w+-->", "", answer).strip()
     return current_archetype, clean_answer

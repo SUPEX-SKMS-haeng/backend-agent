@@ -35,6 +35,15 @@ class HybridSearchClient:
     - Vector 검색 실패 시 BM25 단독 폴백
     """
 
+    # 인텐트별 tags_topic 부스팅 태그 매핑
+    _INTENT_TOPIC_BOOST: dict[str, list[str]] = {
+        "strategy": ["경영전략", "경영체계", "사업전략", "경영철학"],
+        "culture": ["기업문화", "구성원행복", "조직문화", "인간중심경영"],
+        "crisis": ["위기관리", "리스크", "경영위기", "위기"],
+        "supex": ["SUPEX", "경영체계", "경영철학", "경영관리체계"],
+        "hr": ["인재육성", "리더십", "인사관리", "인재"],
+    }
+
     def __init__(self) -> None:
         s = get_setting()
         self._endpoint = s.AZURE_SEARCH_ENDPOINT
@@ -54,14 +63,18 @@ class HybridSearchClient:
         query: str,
         top: int | None = None,
         index_name: str | None = None,
+        vector_query: str | None = None,
+        intent: str | None = None,
     ) -> tuple[str, list[dict]]:
         """
         하이브리드 검색 실행.
 
         Args:
-            query: 검색 쿼리
+            query: 검색 쿼리 (BM25용)
             top: 최종 반환 문서 수 (None이면 HYBRID_SEARCH_TOP_N)
             index_name: 인덱스 이름 (None이면 AZURE_SEARCH_INDEX_NAME)
+            vector_query: Vector 검색 전용 쿼리 (None이면 query 사용)
+            intent: 인텐트 (tags_topic 부스팅용)
 
         Returns:
             (context, sources) — 기존 search_documents()와 동일한 시그니처
@@ -78,7 +91,7 @@ class HybridSearchClient:
         # BM25 + Vector 병렬 실행
         bm25_results, vector_results = await asyncio.gather(
             self._keyword_search(query, index),
-            self._vector_search(query, index),
+            self._vector_search(vector_query or query, index),
             return_exceptions=True,
         )
 
@@ -112,9 +125,12 @@ class HybridSearchClient:
 
         # Weighted RRF 병합
         merged = self._rrf_merge(
-            bm25_results, vector_results, top_n,
+            bm25_results,
+            vector_results,
+            top_n,
             kw_weight_override=kw_override,
             vec_weight_override=vec_override,
+            intent=intent,
         )
 
         total_ms = round((time.monotonic() - total_start) * 1000, 1)
@@ -132,16 +148,35 @@ class HybridSearchClient:
         start = time.monotonic()
 
         client = AzureSearchClient(
-            self._endpoint, index, AzureKeyCredential(self._key),
+            self._endpoint,
+            index,
+            AzureKeyCredential(self._key),
         )
         try:
             results = []
-            async for doc in await client.search(
-                search_text=query,
-                top=self._k_nearest,
-                query_type="simple",
-            ):
-                results.append(self._extract_doc(doc))
+            try:
+                async for doc in await client.search(
+                    search_text=query,
+                    top=self._k_nearest,
+                    query_type="simple",
+                    search_fields=["text_content", "content", "title", "tags_topic"],
+                    filter="content_type ne 'image'",
+                ):
+                    results.append(self._extract_doc(doc))
+            except HttpResponseError as e:
+                if e.status_code == 400:
+                    logger.warning(
+                        f"[hybrid_search:bm25] search_fields/filter 오류 (HTTP 400), "
+                        f"index={index}, 필드/필터 없이 재시도"
+                    )
+                    async for doc in await client.search(
+                        search_text=query,
+                        top=self._k_nearest,
+                        query_type="simple",
+                    ):
+                        results.append(self._extract_doc(doc))
+                else:
+                    raise
 
             elapsed_ms = round((time.monotonic() - start) * 1000, 1)
             logger.info(f"[hybrid_search:bm25] {len(results)} results, {elapsed_ms}ms")
@@ -158,24 +193,43 @@ class HybridSearchClient:
         """
         start = time.monotonic()
 
-        vector_query = VectorizableTextQuery(
+        vq = VectorizableTextQuery(
             text=query,
             k_nearest_neighbors=self._k_nearest,
             fields=self._vector_field,
-            # TODO: Semantic Ranker 도입 시 weight 파라미터 활용 가능
         )
 
         client = AzureSearchClient(
-            self._endpoint, index, AzureKeyCredential(self._key),
+            self._endpoint,
+            index,
+            AzureKeyCredential(self._key),
         )
         try:
             results = []
-            async for doc in await client.search(
-                search_text=None,
-                vector_queries=[vector_query],
-                top=self._k_nearest,
-            ):
-                results.append(self._extract_doc(doc))
+            try:
+                async for doc in await client.search(
+                    search_text=query,
+                    vector_queries=[vq],
+                    top=self._k_nearest,
+                    query_type="semantic",
+                    semantic_configuration_name="default-semantic-config",
+                    filter="content_type ne 'image'",
+                ):
+                    results.append(self._extract_doc(doc))
+            except HttpResponseError as e:
+                if e.status_code == 400:
+                    logger.warning(
+                        f"[hybrid_search:vector] semantic ranker 오류 (HTTP 400), "
+                        f"index={index}, 기본 벡터 검색으로 폴백"
+                    )
+                    async for doc in await client.search(
+                        search_text=None,
+                        vector_queries=[vq],
+                        top=self._k_nearest,
+                    ):
+                        results.append(self._extract_doc(doc))
+                else:
+                    raise
 
             elapsed_ms = round((time.monotonic() - start) * 1000, 1)
             logger.info(f"[hybrid_search:vector] {len(results)} results, {elapsed_ms}ms")
@@ -187,7 +241,7 @@ class HybridSearchClient:
 
     @staticmethod
     def _extract_doc(doc: dict) -> dict:
-        content = doc.get("content", doc.get("chunk", ""))
+        content = doc.get("text_content") or doc.get("content") or doc.get("chunk") or ""
         title = doc.get("title", doc.get("metadata_storage_name", ""))
         return {
             "id": doc.get("id", doc.get("metadata_storage_path", "")),
@@ -214,6 +268,7 @@ class HybridSearchClient:
         *,
         kw_weight_override: float | None = None,
         vec_weight_override: float | None = None,
+        intent: str | None = None,
     ) -> list[dict]:
         """
         Weighted RRF(Reciprocal Rank Fusion).
@@ -247,18 +302,30 @@ class HybridSearchClient:
                 entry["reranker_score"] = doc["reranker_score"]
 
         sorted_results = sorted(
-            score_map.values(), key=lambda x: x["rrf_score"], reverse=True,
+            score_map.values(),
+            key=lambda x: x["rrf_score"],
+            reverse=True,
         )
 
+        # 부스트 전 최고 점수 기록 (품질 게이트 기준값으로 사용)
+        pre_boost_best = sorted_results[0]["rrf_score"] if sorted_results else 0.0
+
+        # 3) tags_topic 기반 인텐트 매칭 부스트
+        if intent and intent in self._INTENT_TOPIC_BOOST:
+            boost_tags = self._INTENT_TOPIC_BOOST[intent]
+            for item in sorted_results:
+                doc_tags = item["doc"].get("tags_topic", "")
+                if doc_tags and any(tag in doc_tags for tag in boost_tags):
+                    item["rrf_score"] *= 1.2  # 20% 부스트
+            # 부스트 후 재정렬
+            sorted_results.sort(key=lambda x: x["rrf_score"], reverse=True)
+
         # ── 품질 게이트 ──────────────────────────────────────
-        # 1) 상대적 품질 필터: 최고 점수의 30% 미만인 문서 제거
+        # 1) 상대적 품질 필터: 부스트 전 최고 점수의 30% 미만인 문서 제거
+        #    (부스트 후 best_score로 하면 비매칭 문서가 부당하게 탈락할 수 있음)
         if sorted_results:
-            best_score = sorted_results[0]["rrf_score"]
-            quality_threshold = best_score * 0.3
-            sorted_results = [
-                r for r in sorted_results
-                if r["rrf_score"] >= quality_threshold
-            ]
+            quality_threshold = pre_boost_best * 0.3
+            sorted_results = [r for r in sorted_results if r["rrf_score"] >= quality_threshold]
 
         # 2) 콘텐츠 중복 제거: 70% 이상 텍스트 오버랩인 문서 제거
         sorted_results = self._deduplicate_content(sorted_results)
@@ -366,6 +433,11 @@ class HybridSearchClient:
             rank_signal = max(0.0, 1.0 - (bm25_rank - 1) / 20.0)
             signals.append(rank_signal)
 
+        # Signal 4: Semantic Reranker 점수 (0~4 범위, 4로 나눠 0~1 정규화)
+        reranker = item.get("reranker_score")
+        if reranker is not None and reranker > 0:
+            signals.append(min(reranker / 4.0, 1.0))
+
         return round(sum(signals) / len(signals), 4) if signals else 0.0
 
     @staticmethod
@@ -375,16 +447,19 @@ class HybridSearchClient:
 
         context_parts: list[str] = []
         sources: list[dict] = []
+        source_idx = 0
 
         for i, item in enumerate(merged):
             doc = item["doc"]
             content = doc.get("content", "")
-            title = doc.get("title", f"문서 {i + 1}")
+            title = doc.get("title", "")
 
             if not content:
-                logger.debug(f"[hybrid_search] RRF rank {i+1} 문서에 content 없음, skip: title={title}")
+                logger.debug(f"[hybrid_search] RRF rank {i + 1} 문서에 content 없음, skip: title={title}")
                 continue
 
+            source_idx += 1
+            title = doc.get("title", f"문서 {source_idx}")
             abs_relevance = HybridSearchClient._compute_absolute_relevance(item)
 
             # 절대 관련도 기반 신뢰도 등급
@@ -395,27 +470,50 @@ class HybridSearchClient:
             else:
                 confidence_level = "low"
 
-            context_parts.append(f"[{title}]\n{content}")
-            sources.append({
-                "index": i + 1,
-                "title": title,
-                "score": item.get("normalized_score", round(item["rrf_score"], 6)),
-                "rrf_score_raw": round(item["rrf_score"], 6),
-                "absolute_relevance": abs_relevance,
-                "confidence_level": confidence_level,
-                "bm25_score": item["bm25_score"],
-                "bm25_rank": item["bm25_rank"],
-                "vector_score": item["vector_score"],
-                "vector_rank": item["vector_rank"],
-                "reranker_score": item["reranker_score"],
-                "content": content,
-                "content_preview": content[:200],
-                "document_path": doc.get("document_path", ""),
-                "page_number": doc.get("page_number"),
-                "tags_topic": doc.get("tags_topic", ""),
-                "author": doc.get("author", ""),
-                "issue": doc.get("issue", ""),
-            })
+            ctx_desc = doc.get("context", "")
+
+            # low-confidence 문서는 LLM 컨텍스트에서 제외 (sources에는 포함)
+            if confidence_level != "low":
+                if ctx_desc:
+                    context_parts.append(f"[자료 {source_idx}: {title}]\n[맥락: {ctx_desc}]\n{content}")
+                else:
+                    context_parts.append(f"[자료 {source_idx}: {title}]\n{content}")
+
+            sources.append(
+                {
+                    "included_in_context": confidence_level != "low",
+                    "index": source_idx,
+                    "title": title,
+                    "context_desc": ctx_desc,
+                    "score": item.get("normalized_score", round(item["rrf_score"], 6)),
+                    "rrf_score_raw": round(item["rrf_score"], 6),
+                    "absolute_relevance": abs_relevance,
+                    "confidence_level": confidence_level,
+                    "bm25_score": item["bm25_score"],
+                    "bm25_rank": item["bm25_rank"],
+                    "vector_score": item["vector_score"],
+                    "vector_rank": item["vector_rank"],
+                    "reranker_score": item["reranker_score"],
+                    "content": content,
+                    "content_preview": content[:200],
+                    "document_path": doc.get("document_path", ""),
+                    "page_number": doc.get("page_number"),
+                    "tags_topic": doc.get("tags_topic", ""),
+                    "author": doc.get("author", ""),
+                    "issue": doc.get("issue", ""),
+                }
+            )
+
+        # 폴백: 모든 문서가 low-confidence면 최상위 1개를 컨텍스트에 포함
+        if not context_parts and sources:
+            logger.warning("[hybrid_search] 모든 문서가 low-confidence — 최상위 문서 1개를 컨텍스트에 포함")
+            top_src = sources[0]
+            ctx_desc = top_src.get("context_desc", "")
+            if ctx_desc:
+                context_parts.append(f"[자료 {top_src['index']}: {top_src['title']}]\n[맥락: {ctx_desc}]\n{top_src['content']}")
+            else:
+                context_parts.append(f"[자료 {top_src['index']}: {top_src['title']}]\n{top_src['content']}")
+            top_src["included_in_context"] = True
 
         context = "\n\n---\n\n".join(context_parts)
         return context, sources
@@ -437,11 +535,26 @@ async def hybrid_search_documents(
     query: str,
     top: int | None = None,
     index_name: str | None = None,
+    vector_query: str | None = None,
+    intent: str | None = None,
 ) -> tuple[str, list[dict]]:
     """
     하이브리드 검색 편의 함수.
 
     기존 search_documents(query, top, index_name)과 동일한 시그니처로
     드롭인 교체 가능.
+
+    Args:
+        query: BM25 키워드 검색용 쿼리
+        top: 최종 반환 문서 수
+        index_name: 인덱스 이름
+        vector_query: Vector 검색 전용 쿼리 (None이면 query 사용)
+        intent: 인텐트 (tags_topic 부스팅용)
     """
-    return await _get_hybrid_client().search(query, top=top, index_name=index_name)
+    return await _get_hybrid_client().search(
+        query,
+        top=top,
+        index_name=index_name,
+        vector_query=vector_query,
+        intent=intent,
+    )
